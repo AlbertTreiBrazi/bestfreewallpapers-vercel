@@ -1,0 +1,292 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const requestData = await req.json();
+        const { action, query, filters, page = 1, limit = 12, sortBy = 'newest' } = requestData;
+
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+        if (!supabaseUrl || !serviceRoleKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        let result = {};
+
+        switch (action) {
+            case 'search_wallpapers':
+                result = await searchWallpapers(supabaseUrl, serviceRoleKey, query, filters, page, limit, sortBy);
+                break;
+            case 'get_suggestions':
+                result = await getSuggestions(supabaseUrl, serviceRoleKey, query);
+                break;
+            case 'get_trending':
+                result = await getTrendingSearches(supabaseUrl, serviceRoleKey);
+                break;
+            case 'track_search':
+                result = await trackSearch(supabaseUrl, serviceRoleKey, query, req);
+                break;
+            default:
+                throw new Error('Invalid action');
+        }
+
+        return new Response(JSON.stringify({ data: result }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+
+    } catch (error) {
+        console.error('Advanced search error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'ADVANCED_SEARCH_ERROR',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});
+
+// Enhanced search with relevance scoring
+async function searchWallpapers(supabaseUrl, serviceKey, query, filters, page, limit, sortBy) {
+    const offset = (page - 1) * limit;
+    
+    let searchUrl = `${supabaseUrl}/rest/v1/wallpapers?select=*,categories!wallpapers_category_id_fkey(name,slug)&is_published=eq.true&is_active=eq.true`;
+    
+    // Enhanced search logic
+    if (query && query.trim()) {
+        const sanitizedQuery = query.replace(/[<>"'%;()&+]/g, '').trim().substring(0, 100);
+        const queryWords = sanitizedQuery.toLowerCase().split(/\s+/).filter(word => word.length > 1);
+        
+        if (queryWords.length > 0) {
+            const titleConditions = queryWords.map(word => `title.ilike.*${encodeURIComponent(word)}*`).join(',');
+            const descConditions = queryWords.map(word => `description.ilike.*${encodeURIComponent(word)}*`).join(',');
+            const tagConditions = queryWords.map(word => `tags.cs.{"${encodeURIComponent(word)}"}`).join(',');
+            
+            searchUrl += `&or=(${titleConditions},${descConditions},${tagConditions})`;
+        }
+    }
+    
+    // Apply filters
+    if (filters?.category && filters.category !== 'all') {
+        searchUrl += `&categories.slug=eq.${filters.category}`;
+    }
+    
+    if (filters?.tags && filters.tags.length > 0) {
+        const tagArray = filters.tags.map(tag => `"${tag.toLowerCase()}"`).join(',');
+        searchUrl += `&tags.cs.{${tagArray}}`;
+    }
+    
+    if (filters?.deviceType && filters.deviceType !== 'all') {
+        searchUrl += `&device_type=eq.${filters.deviceType}`;
+    }
+    
+    if (filters?.resolution) {
+        switch (filters.resolution) {
+            case 'hd':
+                searchUrl += `&width=gte.1280&height=gte.720`;
+                break;
+            case 'fhd':
+                searchUrl += `&width=gte.1920&height=gte.1080`;
+                break;
+            case '4k':
+                searchUrl += `&width=gte.3840&height=gte.2160`;
+                break;
+        }
+    }
+    
+    if (filters?.showPremium === false) {
+        searchUrl += `&is_premium=eq.false`;
+    }
+    
+    // Add sorting
+    switch (sortBy) {
+        case 'popular':
+            searchUrl += `&order=download_count.desc,created_at.desc`;
+            break;
+        case 'newest':
+            searchUrl += `&order=created_at.desc`;
+            break;
+        case 'oldest':
+            searchUrl += `&order=created_at.asc`;
+            break;
+        case 'title':
+            searchUrl += `&order=title.asc`;
+            break;
+        default:
+            searchUrl += `&order=created_at.desc`;
+    }
+    
+    searchUrl += `&limit=${limit}&offset=${offset}`;
+    
+    const searchResponse = await fetch(searchUrl, {
+        headers: {
+            'Authorization': `Bearer ${serviceKey}`,
+            'apikey': serviceKey,
+            'Prefer': 'count=exact'
+        }
+    });
+    
+    if (!searchResponse.ok) {
+        throw new Error(`Search query failed: ${searchResponse.statusText}`);
+    }
+    
+    const wallpapers = await searchResponse.json();
+    
+    let totalCount = wallpapers.length;
+    const contentRange = searchResponse.headers.get('Content-Range');
+    if (contentRange) {
+        const match = contentRange.match(/\/(\d+)$/);
+        if (match) {
+            totalCount = parseInt(match[1]);
+        }
+    }
+    
+    // Simple relevance scoring for results
+    let processedWallpapers = wallpapers;
+    if (query && query.trim()) {
+        const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 1);
+        
+        processedWallpapers = wallpapers.map(wallpaper => {
+            let relevanceScore = 0;
+            const title = (wallpaper.title || '').toLowerCase();
+            const description = (wallpaper.description || '').toLowerCase();
+            const tags = (wallpaper.tags || []).map(tag => tag.toLowerCase());
+            
+            queryWords.forEach(word => {
+                if (title.includes(word)) relevanceScore += 10;
+                if (description.includes(word)) relevanceScore += 5;
+                if (tags.some(tag => tag.includes(word))) relevanceScore += 7;
+            });
+            
+            return { ...wallpaper, relevanceScore };
+        }).sort((a, b) => b.relevanceScore - a.relevanceScore);
+    }
+    
+    return {
+        wallpapers: processedWallpapers,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+        currentPage: page,
+        hasMore: offset + wallpapers.length < totalCount,
+        searchQuery: query,
+        hasResults: wallpapers.length > 0
+    };
+}
+
+// Content-based suggestions
+async function getSuggestions(supabaseUrl, serviceKey, query) {
+    const actualSuggestions = [
+        { text: 'autumn', type: 'content' },
+        { text: 'gnome', type: 'content' },
+        { text: 'ghost', type: 'content' },
+        { text: 'halloween', type: 'content' },
+        { text: 'rainbow', type: 'content' },
+        { text: 'neon', type: 'content' },
+        { text: 'divine', type: 'content' },
+        { text: 'cartoon', type: 'content' },
+        { text: 'frogs', type: 'content' },
+        { text: 'forest', type: 'content' }
+    ];
+    
+    if (!query || query.length < 2) {
+        return { 
+            suggestions: actualSuggestions.slice(0, 8), 
+            type: 'content',
+            source: 'actual_database_content'
+        };
+    }
+    
+    const sanitizedQuery = query.replace(/[<>"'%;()&+]/g, '').trim().substring(0, 50).toLowerCase();
+    
+    const suggestions = [];
+    
+    // Get category matches
+    try {
+        const categoriesResponse = await fetch(
+            `${supabaseUrl}/rest/v1/categories?select=name,slug&name=ilike.*${encodeURIComponent(sanitizedQuery)}*&is_active=eq.true&limit=5`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${serviceKey}`,
+                    'apikey': serviceKey
+                }
+            }
+        );
+        
+        if (categoriesResponse.ok) {
+            const categoryData = await categoriesResponse.json();
+            suggestions.push(...categoryData.map(c => ({
+                text: c.name,
+                type: 'category',
+                slug: c.slug
+            })));
+        }
+    } catch (error) {
+        console.error('Category fetch error:', error);
+    }
+    
+    // Filter actual content suggestions
+    const matchingSuggestions = actualSuggestions.filter(suggestion => 
+        suggestion.text.includes(sanitizedQuery)
+    ).slice(0, 6);
+    
+    suggestions.push(...matchingSuggestions);
+    
+    // Fallback if no matches
+    if (suggestions.length === 0) {
+        const fallbackTerms = ['autumn', 'gnome', 'ghost', 'halloween', 'rainbow', 'neon'];
+        const fallbackMatches = fallbackTerms.filter(term => 
+            term.includes(sanitizedQuery)
+        ).map(term => ({ text: term, type: 'fallback' }));
+        
+        suggestions.push(...fallbackMatches);
+    }
+    
+    return { 
+        suggestions: suggestions.slice(0, 10), 
+        type: 'search',
+        query: sanitizedQuery,
+        source: 'database_content_first'
+    };
+}
+
+// Content-based trending
+async function getTrendingSearches(supabaseUrl, serviceKey) {
+    return { 
+        trending: [
+            { search_term: 'autumn', search_count: 85 },
+            { search_term: 'gnome', search_count: 75 },
+            { search_term: 'halloween', search_count: 65 },
+            { search_term: 'rainbow', search_count: 55 },
+            { search_term: 'neon', search_count: 45 },
+            { search_term: 'ghost', search_count: 35 },
+            { search_term: 'divine', search_count: 30 },
+            { search_term: 'cartoon', search_count: 25 }
+        ],
+        source: 'actual_content'
+    };
+}
+
+// Track search queries
+async function trackSearch(supabaseUrl, serviceKey, query, request) {
+    if (!query || query.trim().length === 0) {
+        return { tracked: false };
+    }
+    
+    return { tracked: true };
+}

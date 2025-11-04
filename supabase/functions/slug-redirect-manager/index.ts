@@ -1,0 +1,328 @@
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const requestData = await req.json();
+    const { action, old_slug, new_slug, wallpaper_id } = requestData;
+
+    if (!action) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Action is required'
+        }
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+    if (!serviceRoleKey || !supabaseUrl) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const supabaseHeaders = {
+      'Authorization': `Bearer ${serviceRoleKey}`,
+      'apikey': serviceRoleKey,
+      'Content-Type': 'application/json'
+    };
+
+    let responseData = {};
+
+    switch (action) {
+      case 'create_redirect': {
+        if (!old_slug || !new_slug) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'Both old_slug and new_slug are required'
+            }
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Check if redirect already exists
+        const existingResponse = await fetch(
+          `${supabaseUrl}/rest/v1/slug_redirects?old_slug=eq.${old_slug}`,
+          { headers: supabaseHeaders }
+        );
+
+        if (existingResponse.ok) {
+          const existing = await existingResponse.json();
+          if (existing.length > 0) {
+            // Update existing redirect
+            const updateResponse = await fetch(
+              `${supabaseUrl}/rest/v1/slug_redirects?old_slug=eq.${old_slug}`,
+              {
+                method: 'PATCH',
+                headers: {
+                  ...supabaseHeaders,
+                  'Prefer': 'return=representation'
+                },
+                body: JSON.stringify({
+                  new_slug: new_slug,
+                  updated_at: new Date().toISOString()
+                })
+              }
+            );
+
+            if (!updateResponse.ok) {
+              throw new Error('Failed to update redirect');
+            }
+
+            responseData = await updateResponse.json();
+          } else {
+            // Create new redirect
+            const createResponse = await fetch(
+              `${supabaseUrl}/rest/v1/slug_redirects`,
+              {
+                method: 'POST',
+                headers: {
+                  ...supabaseHeaders,
+                  'Prefer': 'return=representation'
+                },
+                body: JSON.stringify({
+                  old_slug: old_slug,
+                  new_slug: new_slug,
+                  wallpaper_id: wallpaper_id || null,
+                  redirect_type: '301',
+                  is_active: true,
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString()
+                })
+              }
+            );
+
+            if (!createResponse.ok) {
+              throw new Error('Failed to create redirect');
+            }
+
+            responseData = await createResponse.json();
+          }
+        }
+        break;
+      }
+
+      case 'check_redirect': {
+        if (!old_slug) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'old_slug is required'
+            }
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        const redirectResponse = await fetch(
+          `${supabaseUrl}/rest/v1/slug_redirects?old_slug=eq.${old_slug}&is_active=eq.true&select=new_slug,redirect_type`,
+          { headers: supabaseHeaders }
+        );
+
+        if (!redirectResponse.ok) {
+          throw new Error('Failed to check redirect');
+        }
+
+        const redirects = await redirectResponse.json();
+        
+        if (redirects.length > 0) {
+          responseData = {
+            redirect_found: true,
+            new_slug: redirects[0].new_slug,
+            redirect_type: redirects[0].redirect_type
+          };
+        } else {
+          responseData = {
+            redirect_found: false
+          };
+        }
+        break;
+      }
+
+      case 'update_wallpaper_slug': {
+        if (!wallpaper_id || !new_slug) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'wallpaper_id and new_slug are required'
+            }
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        // Get current wallpaper slug
+        const wallpaperResponse = await fetch(
+          `${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaper_id}&select=slug`,
+          { headers: supabaseHeaders }
+        );
+
+        if (!wallpaperResponse.ok) {
+          throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        if (wallpapers.length === 0) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'WALLPAPER_NOT_FOUND',
+              message: 'Wallpaper not found'
+            }
+          }), {
+            status: 404,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        const currentSlug = wallpapers[0].slug;
+        
+        if (currentSlug !== new_slug) {
+          // Create redirect from old slug to new slug
+          const redirectResponse = await fetch(
+            `${supabaseUrl}/rest/v1/slug_redirects`,
+            {
+              method: 'POST',
+              headers: supabaseHeaders,
+              body: JSON.stringify({
+                old_slug: currentSlug,
+                new_slug: new_slug,
+                wallpaper_id: wallpaper_id,
+                redirect_type: '301',
+                is_active: true,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              })
+            }
+          );
+
+          // Update wallpaper slug
+          const updateResponse = await fetch(
+            `${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaper_id}`,
+            {
+              method: 'PATCH',
+              headers: {
+                ...supabaseHeaders,
+                'Prefer': 'return=representation'
+              },
+              body: JSON.stringify({
+                slug: new_slug,
+                updated_at: new Date().toISOString()
+              })
+            }
+          );
+
+          if (!updateResponse.ok) {
+            throw new Error('Failed to update wallpaper slug');
+          }
+
+          responseData = {
+            success: true,
+            old_slug: currentSlug,
+            new_slug: new_slug,
+            redirect_created: redirectResponse.ok
+          };
+        } else {
+          responseData = {
+            success: true,
+            message: 'Slug unchanged'
+          };
+        }
+        break;
+      }
+
+      case 'list_redirects': {
+        const redirectsResponse = await fetch(
+          `${supabaseUrl}/rest/v1/slug_redirects?select=*&order=created_at.desc&limit=100`,
+          { headers: supabaseHeaders }
+        );
+
+        if (!redirectsResponse.ok) {
+          throw new Error('Failed to fetch redirects');
+        }
+
+        responseData = await redirectsResponse.json();
+        break;
+      }
+
+      case 'delete_redirect': {
+        if (!old_slug) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'INVALID_REQUEST',
+              message: 'old_slug is required'
+            }
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        const deleteResponse = await fetch(
+          `${supabaseUrl}/rest/v1/slug_redirects?old_slug=eq.${old_slug}`,
+          {
+            method: 'DELETE',
+            headers: supabaseHeaders
+          }
+        );
+
+        if (!deleteResponse.ok) {
+          throw new Error('Failed to delete redirect');
+        }
+
+        responseData = {
+          success: true,
+          message: 'Redirect deleted successfully'
+        };
+        break;
+      }
+
+      default:
+        return new Response(JSON.stringify({
+          error: {
+            code: 'INVALID_ACTION',
+            message: 'Invalid action specified'
+          }
+        }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+
+    return new Response(JSON.stringify({ data: responseData }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error: any) {
+    console.error('Slug redirect manager error:', error);
+
+    const errorResponse = {
+      error: {
+        code: 'FUNCTION_ERROR',
+        message: error.message || 'Internal server error'
+      }
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});

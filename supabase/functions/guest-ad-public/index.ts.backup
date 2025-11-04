@@ -1,0 +1,122 @@
+// Guest Ad Public API - Serves guest ad settings to public users
+// This endpoint provides guest ad configuration for display in download modals
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Max-Age': '86400',
+}
+
+serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders })
+  }
+
+  try {
+    // Only allow GET requests
+    if (req.method !== 'GET') {
+      throw new Error('Method not allowed')
+    }
+
+    // Create Supabase client with service role key for database access
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    
+    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2')
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+    // Get guest ad settings from database
+    const { data: settingsArray, error } = await supabase
+      .from('guest_ad_settings')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(1)
+    
+    const settings = settingsArray?.[0]
+
+    if (error || !settings) {
+      console.error('Error fetching guest ad settings:', error)
+      console.log('Query details - table: guest_ad_settings, order: updated_at desc, limit: 1')
+      console.log('Settings result:', settingsArray)
+      // Return default settings if database query fails
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            guest_ad_active: true,
+            guest_timer_duration: 8,
+            guest_ad_content_type: 'image_upload',
+            guest_ad_image_url: null,
+            guest_ad_external_url: null,
+            guest_ad_html_content: null,
+            guest_ad_click_url: null
+          }
+        }),
+        {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'public, max-age=300' // 5-minute cache
+          }
+        }
+      )
+    }
+
+    // Log request for monitoring
+    console.log('Guest ad settings served successfully:', settings)
+    console.log('Settings data:', JSON.stringify(settings, null, 2))
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          guest_ad_active: settings.guest_ad_active,
+          guest_timer_duration: settings.guest_timer_duration,
+          guest_ad_content_type: settings.guest_ad_content_type,
+          guest_ad_image_url: settings.guest_ad_image_url,
+          guest_ad_external_url: settings.guest_ad_external_url,
+          guest_ad_html_content: settings.guest_ad_html_content,
+          guest_ad_click_url: settings.guest_ad_click_url
+        }
+      }),
+      {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=300' // 5-minute cache
+        }
+      }
+    )
+
+  } catch (error: any) {
+    console.error('Guest ad public API error:', error)
+    
+    // Return default settings on error to prevent breaking the site
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          guest_ad_active: true,
+          guest_timer_duration: 8,
+          guest_ad_content_type: 'image_upload',
+          guest_ad_image_url: null,
+          guest_ad_external_url: null,
+          guest_ad_html_content: null,
+          guest_ad_click_url: null
+        }
+      }),
+      {
+        status: 200, // Always return 200 to prevent breaking guest experience
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=60' // Shorter cache on error
+        }
+      }
+    )
+  }
+})

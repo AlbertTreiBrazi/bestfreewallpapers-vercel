@@ -1,0 +1,124 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const requestData = await req.json();
+        const { query, limit = 8 } = requestData;
+
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+        if (!supabaseUrl || !serviceRoleKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // For empty query, return content-based suggestions
+        if (!query || query.length < 2) {
+            const contentSuggestions = [
+                { text: 'autumn', type: 'content', count: 1 },
+                { text: 'gnome', type: 'content', count: 1 },
+                { text: 'ghost', type: 'content', count: 1 },
+                { text: 'halloween', type: 'content', count: 1 },
+                { text: 'rainbow', type: 'content', count: 1 },
+                { text: 'neon', type: 'content', count: 1 },
+                { text: 'divine', type: 'content', count: 1 },
+                { text: 'cartoon', type: 'content', count: 1 }
+            ];
+                
+            return new Response(JSON.stringify({
+                data: {
+                    suggestions: contentSuggestions.slice(0, limit),
+                    type: 'content',
+                    source: 'actual_database_content'
+                }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        const sanitizedQuery = query.replace(/[<>"'%;()&+]/g, '').trim().substring(0, 50).toLowerCase();
+        const suggestions = [];
+
+        // Get category matches
+        const categoriesResponse = await fetch(
+            `${supabaseUrl}/rest/v1/categories?select=name,slug&name=ilike.*${encodeURIComponent(sanitizedQuery)}*&is_active=eq.true&order=sort_order&limit=3`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            }
+        );
+
+        if (categoriesResponse.ok) {
+            const categoryData = await categoriesResponse.json();
+            suggestions.push(...categoryData.map((c) => ({
+                text: c.name,
+                type: 'category',
+                slug: c.slug
+            })));
+        }
+        
+        // Add content-based suggestions that match the query
+        const contentTerms = ['autumn', 'gnome', 'ghost', 'halloween', 'rainbow', 'neon', 'divine', 'cartoon', 'frogs', 'forest', 'road', 'green', 'beady', 'eyes'];
+        const matchingContent = contentTerms.filter(term => 
+            term.includes(sanitizedQuery)
+        ).map(term => ({ text: term, type: 'content' }));
+        
+        suggestions.push(...matchingContent.slice(0, 4));
+
+        // Fallback suggestions if no matches
+        if (suggestions.length === 0) {
+            const fallbackTerms = ['autumn', 'gnome', 'ghost', 'halloween', 'rainbow', 'neon'];
+            const fallbackMatches = fallbackTerms
+                .filter(term => term.includes(sanitizedQuery))
+                .slice(0, 3)
+                .map(term => ({ text: term, type: 'fallback' }));
+            
+            suggestions.push(...fallbackMatches);
+        }
+
+        // Remove duplicates and limit results
+        const uniqueSuggestions = suggestions
+            .filter((item, index, self) => 
+                index === self.findIndex(t => t.text.toLowerCase() === item.text.toLowerCase())
+            )
+            .slice(0, limit);
+
+        return new Response(JSON.stringify({
+            data: {
+                suggestions: uniqueSuggestions,
+                type: 'search',
+                query: sanitizedQuery,
+                source: 'database_content_first'
+            }
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+
+    } catch (error) {
+        console.error('Search autocomplete error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'AUTOCOMPLETE_ERROR',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

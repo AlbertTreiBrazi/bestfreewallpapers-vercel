@@ -1,0 +1,803 @@
+/**
+ * Comprehensive File Upload Security Implementation
+ * Features:
+ * - MIME type validation
+ * - File size limits
+ * - Header validation (magic number check)
+ * - EXIF/metadata stripping
+ * - Malware/content scanning
+ * - File sanitization
+ * - Secure storage
+ */
+
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const requestData = await req.json();
+        const { action, fileData, fileName, fileType, fileSize, uploadType = 'wallpaper' } = requestData;
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Authentication check
+        const authToken = req.headers.get('authorization')?.replace('Bearer ', '');
+        if (!authToken) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: 'Authentication required',
+                code: 'AUTH_REQUIRED'
+            }), {
+                status: 401,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Verify user authentication
+        const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'apikey': Deno.env.get('SUPABASE_ANON_KEY') || ''
+            }
+        });
+
+        if (!userResponse.ok) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: 'Invalid authentication token',
+                code: 'INVALID_TOKEN'
+            }), {
+                status: 401,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        const userData = await userResponse.json();
+        const userId = userData.id;
+
+        if (action === 'upload') {
+            return await handleSecureUpload({
+                fileData,
+                fileName,
+                fileType,
+                fileSize,
+                uploadType,
+                userId,
+                supabaseUrl,
+                serviceRoleKey,
+                corsHeaders
+            });
+        } else if (action === 'validate') {
+            return await validateFileOnly({
+                fileData,
+                fileName,
+                fileType,
+                fileSize,
+                uploadType,
+                corsHeaders
+            });
+        } else {
+            return new Response(JSON.stringify({
+                success: false,
+                error: 'Invalid action',
+                code: 'INVALID_ACTION'
+            }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+    } catch (error: any) {
+        console.error('Secure upload error:', error);
+        return new Response(JSON.stringify({
+            success: false,
+            error: 'Upload processing failed',
+            details: error.message,
+            code: 'PROCESSING_ERROR'
+        }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});
+
+async function handleSecureUpload(params: {
+    fileData: string;
+    fileName: string;
+    fileType: string;
+    fileSize: number;
+    uploadType: string;
+    userId: string;
+    supabaseUrl: string;
+    serviceRoleKey: string;
+    corsHeaders: Record<string, string>;
+}) {
+    const { fileData, fileName, fileType, fileSize, uploadType, userId, supabaseUrl, serviceRoleKey, corsHeaders } = params;
+
+    try {
+        // Step 1: Comprehensive File Validation
+        const validationResult = await comprehensiveFileValidation(fileData, fileName, fileType, fileSize, uploadType);
+        if (!validationResult.valid) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: validationResult.error,
+                code: validationResult.code,
+                details: validationResult.details
+            }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Step 2: Extract and convert file data
+        const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+        const fileBuffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+
+        // Step 3: Advanced security scans
+        const securityScanResult = await performSecurityScans(fileBuffer, validationResult.detectedType);
+        if (!securityScanResult.safe) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: 'File failed security scan',
+                code: 'SECURITY_SCAN_FAILED',
+                details: securityScanResult.issues
+            }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Step 4: Strip metadata and sanitize
+        const sanitizedBuffer = await sanitizeAndStripMetadata(fileBuffer, validationResult.detectedType);
+
+        // Step 5: Generate secure filename
+        const secureFileName = generateSecureFileName(fileName, validationResult.detectedType, userId);
+
+        // Step 6: Upload to secure storage
+        const uploadResult = await uploadToSecureStorage({
+            fileBuffer: sanitizedBuffer,
+            fileName: secureFileName,
+            fileType: validationResult.mimeType,
+            uploadType,
+            userId,
+            supabaseUrl,
+            serviceRoleKey
+        });
+
+        if (!uploadResult.success) {
+            return new Response(JSON.stringify({
+                success: false,
+                error: 'Upload to storage failed',
+                code: 'STORAGE_ERROR',
+                details: uploadResult.error
+            }), {
+                status: 500,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Step 7: Log upload for audit trail
+        await logUploadEvent({
+            userId,
+            fileName: secureFileName,
+            originalFileName: fileName,
+            fileSize: sanitizedBuffer.length,
+            uploadType,
+            securityScans: securityScanResult.scansPerformed,
+            supabaseUrl,
+            serviceRoleKey
+        });
+
+        return new Response(JSON.stringify({
+            success: true,
+            message: 'File uploaded successfully',
+            data: {
+                fileName: secureFileName,
+                url: uploadResult.url,
+                fileSize: sanitizedBuffer.length,
+                securityChecks: {
+                    mimeValidation: true,
+                    headerValidation: true,
+                    metadataStripped: true,
+                    malwareScan: securityScanResult.safe,
+                    scansPerformed: securityScanResult.scansPerformed
+                }
+            }
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+
+    } catch (error: any) {
+        console.error('Upload processing error:', error);
+        return new Response(JSON.stringify({
+            success: false,
+            error: 'Upload processing failed',
+            code: 'PROCESSING_ERROR',
+            details: error.message
+        }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+async function validateFileOnly(params: {
+    fileData: string;
+    fileName: string;
+    fileType: string;
+    fileSize: number;
+    uploadType: string;
+    corsHeaders: Record<string, string>;
+}) {
+    const { fileData, fileName, fileType, fileSize, uploadType, corsHeaders } = params;
+
+    const validationResult = await comprehensiveFileValidation(fileData, fileName, fileType, fileSize, uploadType);
+    
+    return new Response(JSON.stringify({
+        success: validationResult.valid,
+        validation: validationResult
+    }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+}
+
+async function comprehensiveFileValidation(fileData: string, fileName: string, fileType: string, fileSize: number, uploadType: string) {
+    const allowedTypes = getAllowedFileTypes(uploadType);
+    
+    // 1. File size validation
+    const maxSize = getMaxFileSize(uploadType);
+    if (fileSize > maxSize) {
+        return {
+            valid: false,
+            error: `File too large. Maximum size: ${formatFileSize(maxSize)}`,
+            code: 'FILE_TOO_LARGE',
+            details: { maxSize, actualSize: fileSize }
+        };
+    }
+
+    // 2. Filename validation
+    const fileNameValidation = validateFileName(fileName);
+    if (!fileNameValidation.valid) {
+        return {
+            valid: false,
+            error: 'Invalid filename',
+            code: 'INVALID_FILENAME',
+            details: fileNameValidation.issues
+        };
+    }
+
+    // 3. MIME type validation
+    if (!allowedTypes.mimeTypes.includes(fileType)) {
+        return {
+            valid: false,
+            error: `File type not allowed. Allowed types: ${allowedTypes.extensions.join(', ')}`,
+            code: 'INVALID_MIME_TYPE',
+            details: { provided: fileType, allowed: allowedTypes.mimeTypes }
+        };
+    }
+
+    // 4. File header validation (magic number check)
+    const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+    const fileBuffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    
+    const headerValidation = validateFileHeaders(fileBuffer, fileType);
+    if (!headerValidation.valid) {
+        return {
+            valid: false,
+            error: 'File header validation failed',
+            code: 'INVALID_FILE_HEADER',
+            details: headerValidation.details
+        };
+    }
+
+    // 5. Extension validation
+    const extension = fileName.toLowerCase().split('.').pop() || '';
+    if (!allowedTypes.extensions.includes(extension)) {
+        return {
+            valid: false,
+            error: `File extension not allowed. Allowed extensions: ${allowedTypes.extensions.join(', ')}`,
+            code: 'INVALID_EXTENSION',
+            details: { provided: extension, allowed: allowedTypes.extensions }
+        };
+    }
+
+    return {
+        valid: true,
+        detectedType: headerValidation.detectedType,
+        mimeType: fileType,
+        extension: extension,
+        sanitizedName: fileNameValidation.sanitizedName
+    };
+}
+
+function getAllowedFileTypes(uploadType: string) {
+    const typeMap: Record<string, { mimeTypes: string[], extensions: string[] }> = {
+        wallpaper: {
+            mimeTypes: ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'],
+            extensions: ['jpg', 'jpeg', 'png', 'webp']
+        },
+        profile_picture: {
+            mimeTypes: ['image/jpeg', 'image/jpg', 'image/png'],
+            extensions: ['jpg', 'jpeg', 'png']
+        },
+        category_image: {
+            mimeTypes: ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/svg+xml'],
+            extensions: ['jpg', 'jpeg', 'png', 'webp', 'svg']
+        }
+    };
+
+    return typeMap[uploadType] || typeMap.wallpaper;
+}
+
+function getMaxFileSize(uploadType: string): number {
+    const sizeMap: Record<string, number> = {
+        wallpaper: 10 * 1024 * 1024, // 10MB
+        profile_picture: 2 * 1024 * 1024, // 2MB
+        category_image: 5 * 1024 * 1024 // 5MB
+    };
+
+    return sizeMap[uploadType] || sizeMap.wallpaper;
+}
+
+function validateFileName(fileName: string) {
+    const issues: string[] = [];
+    
+    // Check for dangerous characters
+    const dangerousChars = /[<>:"|?*\\]/;
+    if (dangerousChars.test(fileName)) {
+        issues.push('Contains dangerous characters');
+    }
+
+    // Check for path traversal attempts
+    if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+        issues.push('Path traversal attempt detected');
+    }
+
+    // Check for script extensions
+    const scriptExtensions = ['php', 'js', 'html', 'htm', 'exe', 'bat', 'cmd', 'com', 'pif', 'scr', 'vbs', 'jar'];
+    const extension = fileName.toLowerCase().split('.').pop() || '';
+    if (scriptExtensions.includes(extension)) {
+        issues.push('Executable file extension detected');
+    }
+
+    // Check length
+    if (fileName.length > 255) {
+        issues.push('Filename too long');
+    }
+
+    // Sanitize filename
+    const sanitizedName = fileName
+        .replace(/[<>:"|?*\\]/g, '_')
+        .replace(/\.+/g, '.')
+        .replace(/^\.*/, '')
+        .substring(0, 255);
+
+    return {
+        valid: issues.length === 0,
+        issues,
+        sanitizedName
+    };
+}
+
+function validateFileHeaders(fileBuffer: Uint8Array, mimeType: string) {
+    const signatures: Record<string, { signature: number[], offset: number }[]> = {
+        'image/jpeg': [
+            { signature: [0xFF, 0xD8, 0xFF], offset: 0 }
+        ],
+        'image/png': [
+            { signature: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], offset: 0 }
+        ],
+        'image/webp': [
+            { signature: [0x52, 0x49, 0x46, 0x46], offset: 0 }, // RIFF
+            { signature: [0x57, 0x45, 0x42, 0x50], offset: 8 }  // WEBP
+        ]
+    };
+
+    const expectedSignatures = signatures[mimeType];
+    if (!expectedSignatures) {
+        return { valid: true, detectedType: mimeType }; // Allow if no signature defined
+    }
+
+    for (const sig of expectedSignatures) {
+        let matches = true;
+        for (let i = 0; i < sig.signature.length; i++) {
+            if (fileBuffer[sig.offset + i] !== sig.signature[i]) {
+                matches = false;
+                break;
+            }
+        }
+        if (!matches) {
+            return {
+                valid: false,
+                details: `File header doesn't match expected ${mimeType} signature`,
+                detectedType: 'unknown'
+            };
+        }
+    }
+
+    return { valid: true, detectedType: mimeType };
+}
+
+async function performSecurityScans(fileBuffer: Uint8Array, fileType: string) {
+    const scansPerformed: string[] = [];
+    const issues: string[] = [];
+
+    // 1. Basic malware signature scan
+    scansPerformed.push('malware_signatures');
+    const malwareCheck = scanForMalwareSignatures(fileBuffer);
+    if (!malwareCheck.safe) {
+        issues.push(...malwareCheck.threats);
+    }
+
+    // 2. Script injection scan
+    scansPerformed.push('script_injection');
+    const scriptCheck = scanForScriptInjection(fileBuffer);
+    if (!scriptCheck.safe) {
+        issues.push(...scriptCheck.threats);
+    }
+
+    // 3. Image-specific scans
+    if (fileType.startsWith('image/')) {
+        scansPerformed.push('image_integrity');
+        const imageCheck = await scanImageIntegrity(fileBuffer, fileType);
+        if (!imageCheck.safe) {
+            issues.push(...imageCheck.issues);
+        }
+    }
+
+    return {
+        safe: issues.length === 0,
+        issues,
+        scansPerformed
+    };
+}
+
+function scanForMalwareSignatures(fileBuffer: Uint8Array) {
+    const threats: string[] = [];
+    
+    // Basic malware signatures (simplified for demo)
+    const malwareSignatures = [
+        'eval(',
+        'exec(',
+        'system(',
+        'shell_exec(',
+        'base64_decode(',
+        '<script',
+        'javascript:',
+        'vbscript:'
+    ];
+
+    const fileContent = new TextDecoder('utf-8', { fatal: false }).decode(fileBuffer);
+    
+    for (const signature of malwareSignatures) {
+        if (fileContent.toLowerCase().includes(signature.toLowerCase())) {
+            threats.push(`Suspicious content detected: ${signature}`);
+        }
+    }
+
+    return {
+        safe: threats.length === 0,
+        threats
+    };
+}
+
+function scanForScriptInjection(fileBuffer: Uint8Array) {
+    const threats: string[] = [];
+    const fileContent = new TextDecoder('utf-8', { fatal: false }).decode(fileBuffer);
+    
+    // Check for embedded scripts
+    const scriptPatterns = [
+        /<script[^>]*>/i,
+        /<iframe[^>]*>/i,
+        /javascript:/i,
+        /on\w+\s*=/i, // on* event handlers
+        /data:text\/html/i
+    ];
+
+    for (const pattern of scriptPatterns) {
+        if (pattern.test(fileContent)) {
+            threats.push(`Script injection detected: ${pattern.source}`);
+        }
+    }
+
+    return {
+        safe: threats.length === 0,
+        threats
+    };
+}
+
+async function scanImageIntegrity(fileBuffer: Uint8Array, fileType: string) {
+    const issues: string[] = [];
+    
+    try {
+        // Basic image validation - check if it's a valid image structure
+        if (fileType === 'image/jpeg') {
+            // JPEG should end with FFD9
+            const lastTwo = [fileBuffer[fileBuffer.length - 2], fileBuffer[fileBuffer.length - 1]];
+            if (lastTwo[0] !== 0xFF || lastTwo[1] !== 0xD9) {
+                issues.push('Invalid JPEG structure - missing end marker');
+            }
+        }
+        
+        // Check for suspiciously large metadata sections
+        if (fileType === 'image/jpeg') {
+            const exifSize = getExifSize(fileBuffer);
+            if (exifSize > 100000) { // 100KB of EXIF data is suspicious
+                issues.push('Unusually large EXIF data detected');
+            }
+        }
+        
+    } catch (error) {
+        issues.push('Image integrity check failed');
+    }
+
+    return {
+        safe: issues.length === 0,
+        issues
+    };
+}
+
+function getExifSize(fileBuffer: Uint8Array): number {
+    // Simplified EXIF size detection
+    if (fileBuffer.length < 12) return 0;
+    
+    // Look for EXIF marker (FFE1)
+    for (let i = 0; i < fileBuffer.length - 4; i++) {
+        if (fileBuffer[i] === 0xFF && fileBuffer[i + 1] === 0xE1) {
+            // Next two bytes are the size
+            const size = (fileBuffer[i + 2] << 8) | fileBuffer[i + 3];
+            return size;
+        }
+    }
+    
+    return 0;
+}
+
+async function sanitizeAndStripMetadata(fileBuffer: Uint8Array, fileType: string): Promise<Uint8Array> {
+    // For this implementation, we'll create a basic metadata stripper
+    // In a production environment, you'd use a proper image processing library
+    
+    if (fileType === 'image/jpeg') {
+        return stripJpegMetadata(fileBuffer);
+    } else if (fileType === 'image/png') {
+        return stripPngMetadata(fileBuffer);
+    }
+    
+    return fileBuffer; // Return as-is for other types
+}
+
+function stripJpegMetadata(fileBuffer: Uint8Array): Uint8Array {
+    const result: number[] = [];
+    let i = 0;
+    
+    // Copy JPEG start marker
+    if (fileBuffer[0] === 0xFF && fileBuffer[1] === 0xD8) {
+        result.push(0xFF, 0xD8);
+        i = 2;
+    }
+    
+    while (i < fileBuffer.length - 1) {
+        if (fileBuffer[i] === 0xFF) {
+            const marker = fileBuffer[i + 1];
+            
+            // Skip EXIF (E1), Comment (FE), and other metadata segments
+            if (marker === 0xE1 || marker === 0xE2 || marker === 0xFE || 
+                (marker >= 0xE4 && marker <= 0xEF)) {
+                // Skip this segment
+                const segmentLength = (fileBuffer[i + 2] << 8) | fileBuffer[i + 3];
+                i += 2 + segmentLength;
+                continue;
+            }
+            
+            // Copy other segments
+            result.push(fileBuffer[i], fileBuffer[i + 1]);
+            
+            if (marker === 0xD9) { // End of image
+                break;
+            }
+            
+            if (marker >= 0xC0 && marker <= 0xDF && marker !== 0xD0 && marker !== 0xD1 && 
+                marker !== 0xD2 && marker !== 0xD3 && marker !== 0xD4 && marker !== 0xD5 && 
+                marker !== 0xD6 && marker !== 0xD7) {
+                // This is a segment with length
+                const segmentLength = (fileBuffer[i + 2] << 8) | fileBuffer[i + 3];
+                for (let j = 0; j < segmentLength; j++) {
+                    result.push(fileBuffer[i + 2 + j]);
+                }
+                i += 2 + segmentLength;
+            } else {
+                i += 2;
+            }
+        } else {
+            result.push(fileBuffer[i]);
+            i++;
+        }
+    }
+    
+    // Ensure we have the end marker
+    if (result.length >= 2 && (result[result.length - 2] !== 0xFF || result[result.length - 1] !== 0xD9)) {
+        result.push(0xFF, 0xD9);
+    }
+    
+    return new Uint8Array(result);
+}
+
+function stripPngMetadata(fileBuffer: Uint8Array): Uint8Array {
+    // PNG metadata stripping (simplified)
+    const result: number[] = [];
+    let i = 0;
+    
+    // Copy PNG signature
+    if (fileBuffer.length >= 8) {
+        for (let j = 0; j < 8; j++) {
+            result.push(fileBuffer[j]);
+        }
+        i = 8;
+    }
+    
+    while (i < fileBuffer.length - 8) {
+        const chunkLength = (fileBuffer[i] << 24) | (fileBuffer[i + 1] << 16) | 
+                           (fileBuffer[i + 2] << 8) | fileBuffer[i + 3];
+        const chunkType = String.fromCharCode(fileBuffer[i + 4], fileBuffer[i + 5], 
+                                             fileBuffer[i + 6], fileBuffer[i + 7]);
+        
+        // Skip metadata chunks
+        if (chunkType === 'tEXt' || chunkType === 'zTXt' || chunkType === 'iTXt' || 
+            chunkType === 'eXIf' || chunkType === 'tIME') {
+            i += 8 + chunkLength + 4; // Skip chunk entirely
+            continue;
+        }
+        
+        // Copy other chunks
+        for (let j = 0; j < 8 + chunkLength + 4 && i + j < fileBuffer.length; j++) {
+            result.push(fileBuffer[i + j]);
+        }
+        
+        i += 8 + chunkLength + 4;
+        
+        if (chunkType === 'IEND') {
+            break;
+        }
+    }
+    
+    return new Uint8Array(result);
+}
+
+function generateSecureFileName(originalName: string, fileType: string, userId: string): string {
+    const timestamp = Date.now();
+    const randomSuffix = crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
+    const extension = getExtensionFromMimeType(fileType);
+    const baseName = originalName.split('.')[0].replace(/[^a-zA-Z0-9-_]/g, '_').substring(0, 50);
+    
+    return `${userId}_${timestamp}_${randomSuffix}_${baseName}.${extension}`;
+}
+
+function getExtensionFromMimeType(mimeType: string): string {
+    const mimeToExt: Record<string, string> = {
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+        'image/svg+xml': 'svg'
+    };
+    
+    return mimeToExt[mimeType] || 'unknown';
+}
+
+async function uploadToSecureStorage(params: {
+    fileBuffer: Uint8Array;
+    fileName: string;
+    fileType: string;
+    uploadType: string;
+    userId: string;
+    supabaseUrl: string;
+    serviceRoleKey: string;
+}) {
+    const { fileBuffer, fileName, fileType, uploadType, userId, supabaseUrl, serviceRoleKey } = params;
+    
+    try {
+        // Determine the bucket based on upload type
+        const bucketName = getBucketName(uploadType);
+        
+        // Upload to Supabase Storage
+        const uploadResponse = await fetch(`${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': fileType,
+                'Cache-Control': 'max-age=3600'
+            },
+            body: fileBuffer
+        });
+
+        if (!uploadResponse.ok) {
+            const errorText = await uploadResponse.text();
+            throw new Error(`Upload failed: ${errorText}`);
+        }
+
+        // Get the public URL
+        const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+
+        return {
+            success: true,
+            url: publicUrl,
+            fileName,
+            bucket: bucketName
+        };
+
+    } catch (error: any) {
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+function getBucketName(uploadType: string): string {
+    const bucketMap: Record<string, string> = {
+        wallpaper: 'wallpapers-secure',
+        profile_picture: 'profiles-secure',
+        category_image: 'categories-secure'
+    };
+    
+    return bucketMap[uploadType] || 'uploads-secure';
+}
+
+async function logUploadEvent(params: {
+    userId: string;
+    fileName: string;
+    originalFileName: string;
+    fileSize: number;
+    uploadType: string;
+    securityScans: string[];
+    supabaseUrl: string;
+    serviceRoleKey: string;
+}) {
+    const { userId, fileName, originalFileName, fileSize, uploadType, securityScans, supabaseUrl, serviceRoleKey } = params;
+    
+    try {
+        await fetch(`${supabaseUrl}/rest/v1/upload_logs`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json',
+                'Prefer': 'return=minimal'
+            },
+            body: JSON.stringify({
+                user_id: userId,
+                file_name: fileName,
+                original_file_name: originalFileName,
+                file_size: fileSize,
+                upload_type: uploadType,
+                security_scans_performed: securityScans,
+                upload_status: 'success',
+                created_at: new Date().toISOString()
+            })
+        });
+    } catch (error) {
+        console.error('Failed to log upload event:', error);
+        // Don't fail the upload if logging fails
+    }
+}
+
+function formatFileSize(bytes: number): string {
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    if (bytes === 0) return '0 Bytes';
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+}

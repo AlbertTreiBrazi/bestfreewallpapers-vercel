@@ -1,0 +1,512 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const requestData = await req.json().catch(() => null);
+        const { action } = requestData || {};
+        
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+        if (!supabaseUrl || !serviceRoleKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Public read access for listing collections (no auth required)
+        if (action === 'list' && req.method === 'POST') {
+            // Get active collections with wallpaper counts
+            const response = await fetch(`${supabaseUrl}/rest/v1/collections?is_active=eq.true&select=*&order=sort_order.asc,created_at.desc`, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch collections');
+            }
+
+            const collections = await response.json();
+            
+            // Add wallpaper counts and seasonal status for each collection
+            const processedCollections = await Promise.all(collections.map(async (collection) => {
+                // Get wallpaper count for this collection
+                const countResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection.id}&select=id`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                        'Prefer': 'count=exact'
+                    }
+                });
+                
+                const countHeader = countResponse.headers.get('content-range');
+                const wallpaperCount = countHeader ? parseInt(countHeader.split('/')[1]) : 0;
+                
+                // Calculate seasonal status
+                const currentMonth = new Date().getMonth() + 1;
+                let isCurrentlySeasonal = false;
+                let seasonalPriority = 0;
+                
+                if (collection.is_seasonal && collection.season_start_month && collection.season_end_month) {
+                    const startMonth = collection.season_start_month;
+                    const endMonth = collection.season_end_month;
+                    
+                    if (startMonth <= endMonth) {
+                        isCurrentlySeasonal = currentMonth >= startMonth && currentMonth <= endMonth;
+                    } else {
+                        // Handle cross-year seasons (e.g., Nov-Feb)
+                        isCurrentlySeasonal = currentMonth >= startMonth || currentMonth <= endMonth;
+                    }
+                    
+                    if (isCurrentlySeasonal) {
+                        seasonalPriority = 100 - Math.abs(currentMonth - startMonth);
+                    }
+                }
+                
+                return {
+                    ...collection,
+                    wallpaper_count: wallpaperCount,
+                    view_count: collection.view_count || 0,
+                    is_currently_seasonal: isCurrentlySeasonal,
+                    seasonal_priority: seasonalPriority
+                };
+            }));
+            
+            // Sort by seasonal priority first, then by sort order
+            processedCollections.sort((a, b) => {
+                if (a.seasonal_priority !== b.seasonal_priority) {
+                    return b.seasonal_priority - a.seasonal_priority;
+                }
+                return a.sort_order - b.sort_order;
+            });
+
+            return new Response(JSON.stringify({
+                data: processedCollections
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Public read access for getting collection wallpapers (admin required)
+        if (action === 'get_collection_wallpapers' && req.method === 'POST') {
+            const { collection_id } = requestData;
+            
+            if (!collection_id) {
+                throw new Error('Collection ID is required');
+            }
+
+            // Get wallpapers in this collection
+            const wallpapersResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection_id}&select=wallpaper_id,sort_order,wallpapers!inner(*)&order=sort_order.asc`, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+
+            if (!wallpapersResponse.ok) {
+                throw new Error('Failed to fetch collection wallpapers');
+            }
+
+            const wallpapersData = await wallpapersResponse.json();
+            const wallpapers = wallpapersData.map(item => ({
+                ...item.wallpapers,
+                collection_sort_order: item.sort_order
+            }));
+
+            return new Response(JSON.stringify({ 
+                data: { 
+                    wallpapers 
+                } 
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Admin action for updating collection wallpapers
+        if (action === 'update_collection_wallpapers' && req.method === 'POST') {
+            const { collection_id, wallpaper_ids } = requestData;
+            
+            if (!collection_id) {
+                throw new Error('Collection ID is required');
+            }
+
+            if (!Array.isArray(wallpaper_ids)) {
+                throw new Error('Wallpaper IDs must be an array');
+            }
+
+            // Remove existing wallpaper associations
+            await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection_id}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+
+            // Add new wallpaper associations
+            if (wallpaper_ids.length > 0) {
+                const collectionWallpapers = wallpaper_ids.map((wallpaper_id, index) => ({
+                    collection_id: collection_id,
+                    wallpaper_id: wallpaper_id,
+                    sort_order: index
+                }));
+
+                const insertResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(collectionWallpapers)
+                });
+
+                if (!insertResponse.ok) {
+                    throw new Error('Failed to add wallpapers to collection');
+                }
+            }
+
+            return new Response(JSON.stringify({ 
+                success: true,
+                message: `Successfully updated collection with ${wallpaper_ids.length} wallpapers`
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // For all other operations, verify admin access
+        const authHeader = req.headers.get('authorization');
+        if (!authHeader) {
+            throw new Error('Authentication required');
+        }
+
+        const token = authHeader.replace('Bearer ', '');
+        const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'apikey': serviceRoleKey
+            }
+        });
+
+        if (!userResponse.ok) {
+            throw new Error('Authentication failed');
+        }
+
+        const userData = await userResponse.json();
+        const userId = userData.id;
+
+        // Check if user is admin and get their permissions
+        const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=is_admin,admin_role,admin_permissions,email,full_name`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey
+            }
+        });
+
+        if (!profileResponse.ok) {
+            throw new Error('Failed to verify admin status');
+        }
+
+        const profiles = await profileResponse.json();
+        const profile = profiles[0];
+
+        if (!profile || !profile.is_admin) {
+            throw new Error('Admin access required');
+        }
+
+        const userRole = profile.admin_role || 'admin';
+        const adminPermissions = profile.admin_permissions || {};
+        
+        // Check if user has manage_collections permission
+        if (!adminPermissions.manage_collections && userRole !== 'super_admin') {
+            throw new Error('Insufficient permissions to manage collections');
+        }
+
+        if (req.method === 'GET') {
+            const url = new URL(req.url);
+            const action = url.searchParams.get('action');
+            const page = parseInt(url.searchParams.get('page') || '1');
+            const limit = parseInt(url.searchParams.get('limit') || '20');
+            const offset = (page - 1) * limit;
+
+            if (action === 'list') {
+                // Get all collections with wallpaper counts
+                const response = await fetch(`${supabaseUrl}/rest/v1/collections?select=*&order=sort_order.asc,created_at.desc&limit=${limit}&offset=${offset}`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch collections');
+                }
+
+                const collections = await response.json();
+                
+                // Get total count for pagination
+                const countResponse = await fetch(`${supabaseUrl}/rest/v1/collections?select=id`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                        'Prefer': 'count=exact'
+                    }
+                });
+                
+                const totalCount = countResponse.headers.get('content-range')?.split('/')[1] || 0;
+                const totalPages = Math.ceil(parseInt(totalCount) / limit);
+
+                return new Response(JSON.stringify({
+                    data: collections,
+                    pagination: {
+                        page,
+                        limit,
+                        totalCount: parseInt(totalCount),
+                        totalPages
+                    }
+                }), {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+            }
+
+            if (action === 'get') {
+                const id = url.searchParams.get('id');
+                if (!id) {
+                    throw new Error('Collection ID is required');
+                }
+
+                const response = await fetch(`${supabaseUrl}/rest/v1/collections?id=eq.${id}&select=*`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch collection');
+                }
+
+                const collections = await response.json();
+                if (collections.length === 0) {
+                    throw new Error('Collection not found');
+                }
+
+                // Get wallpapers in this collection
+                const wallpapersResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${id}&select=wallpaper_id,sort_order,wallpapers!inner(*)&order=sort_order.asc`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    }
+                });
+
+                if (wallpapersResponse.ok) {
+                    const wallpapersData = await wallpapersResponse.json();
+                    collections[0].wallpapers = wallpapersData.map(item => ({
+                        ...item.wallpapers,
+                        collection_sort_order: item.sort_order
+                    }));
+                }
+
+                return new Response(JSON.stringify({ data: collections[0] }), {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+            }
+
+            // Default: return featured collections for homepage
+            const response = await fetch(`${supabaseUrl}/rest/v1/collections?is_featured=eq.true&is_active=eq.true&select=*&order=sort_order.asc&limit=10`, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch featured collections');
+            }
+
+            const collections = await response.json();
+            return new Response(JSON.stringify({ data: collections }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        if (req.method === 'POST') {
+            const { name, slug, description, icon_name, cover_image_url, color_theme, is_seasonal, season_start_month, season_end_month, is_featured, is_active, sort_order } = await req.json();
+
+            if (!name || !slug) {
+                throw new Error('Collection name and slug are required');
+            }
+
+            const createData = {
+                name: name.trim(),
+                slug: slug.trim().toLowerCase(),
+                description: description?.trim() || null,
+                icon_name: icon_name || null,
+                cover_image_url: cover_image_url || null,
+                color_theme: color_theme || null,
+                is_seasonal: is_seasonal || false,
+                season_start_month: season_start_month || null,
+                season_end_month: season_end_month || null,
+                is_featured: is_featured || false,
+                is_active: is_active !== undefined ? is_active : true,
+                sort_order: sort_order || 0,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            };
+
+            const response = await fetch(`${supabaseUrl}/rest/v1/collections`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                },
+                body: JSON.stringify(createData)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to create collection: ${errorText}`);
+            }
+
+            const newCollection = await response.json();
+            return new Response(JSON.stringify({ data: newCollection[0] }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        if (req.method === 'PUT') {
+            const { id, name, slug, description, icon_name, cover_image_url, color_theme, is_seasonal, season_start_month, season_end_month, is_featured, is_active, sort_order, wallpaper_ids } = await req.json();
+
+            if (!id) {
+                throw new Error('Collection ID is required');
+            }
+
+            const updateData = {
+                updated_at: new Date().toISOString()
+            };
+
+            if (name !== undefined) updateData.name = name.trim();
+            if (slug !== undefined) updateData.slug = slug.trim().toLowerCase();
+            if (description !== undefined) updateData.description = description?.trim() || null;
+            if (icon_name !== undefined) updateData.icon_name = icon_name;
+            if (cover_image_url !== undefined) updateData.cover_image_url = cover_image_url;
+            if (color_theme !== undefined) updateData.color_theme = color_theme;
+            if (is_seasonal !== undefined) updateData.is_seasonal = is_seasonal;
+            if (season_start_month !== undefined) updateData.season_start_month = season_start_month;
+            if (season_end_month !== undefined) updateData.season_end_month = season_end_month;
+            if (is_featured !== undefined) updateData.is_featured = is_featured;
+            if (is_active !== undefined) updateData.is_active = is_active;
+            if (sort_order !== undefined) updateData.sort_order = sort_order;
+
+            const response = await fetch(`${supabaseUrl}/rest/v1/collections?id=eq.${id}`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                },
+                body: JSON.stringify(updateData)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to update collection: ${errorText}`);
+            }
+
+            const updatedCollection = await response.json();
+
+            // Update wallpapers in collection if provided
+            if (wallpaper_ids !== undefined && Array.isArray(wallpaper_ids)) {
+                // Remove existing wallpaper associations
+                await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    }
+                });
+
+                // Add new wallpaper associations
+                if (wallpaper_ids.length > 0) {
+                    const collectionWallpapers = wallpaper_ids.map((wallpaper_id, index) => ({
+                        collection_id: id,
+                        wallpaper_id: wallpaper_id,
+                        sort_order: index
+                    }));
+
+                    await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${serviceRoleKey}`,
+                            'apikey': serviceRoleKey,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(collectionWallpapers)
+                    });
+                }
+            }
+
+            return new Response(JSON.stringify({ data: updatedCollection[0] }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        if (req.method === 'DELETE') {
+            const { id } = await req.json();
+            
+            if (!id) {
+                throw new Error('Collection ID is required');
+            }
+
+            // Check if user has permission to delete collections
+            if (!adminPermissions.manage_collections && userRole !== 'super_admin') {
+                throw new Error('Insufficient permissions to delete collections');
+            }
+
+            const response = await fetch(`${supabaseUrl}/rest/v1/collections?id=eq.${id}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to delete collection: ${errorText}`);
+            }
+
+            return new Response(JSON.stringify({ success: true, message: 'Collection deleted successfully' }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+    } catch (error) {
+        console.error('Collections management error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'COLLECTIONS_ERROR',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

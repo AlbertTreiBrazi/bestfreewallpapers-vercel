@@ -1,0 +1,156 @@
+/* Desktop-specific component styles for bug fixes */
+
+/* Category dropdown improvements for desktop */
+@media (min-width: 1440px) {
+  .category-dropdown-wrapper {
+    position: relative;
+  }
+  
+  .category-dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 1200;
+    min-width: 320px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  }
+  
+  .dark .category-dropdown-menu {
+    background: #374151;
+    border-color: #4b5563;
+  }
+  
+  /* Prevent parent overflow from clipping dropdowns */
+  .tabs-container,
+  .search-container,
+  .filters-container {
+    overflow: visible !important;
+  }
+  
+  /* Category grid improvements */
+  .categories-grid {
+    display: grid;
+    gap: 1.5rem;
+  }
+  
+  /* Enhanced category card styling */
+  .category-card-enhanced {
+    position: relative;
+    background: white;
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+    transition: all 0.3s ease;
+  }
+  
+  .category-card-enhanced:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+  }
+  
+  .dark .category-card-enhanced {
+    background: #374151;
+  }
+  
+  /* Image container with proper aspect ratio */
+  .category-image-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+  }
+  
+  .category-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.3s ease;
+  }
+  
+  .category-card-enhanced:hover .category-image {
+    transform: scale(1.05);
+  }
+  
+  /* Fallback placeholder when image fails */
+  .category-image-fallback {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #f3e8ff 0%, #e0e7ff 100%);
+    color: #6b7280;
+  }
+  
+  .dark .category-image-fallback {
+    background: linear-gradient(135deg, #4c1d95 0%, #1e3a8a 100%);
+    color: #9ca3af;
+  }
+}
+
+/* Search page specific fixes */
+@media (min-width: 1440px) {
+  .search-results-container {
+    min-height: 400px;
+  }
+  
+  .search-empty-state {
+    text-align: center;
+    padding: 4rem 2rem;
+  }
+  
+  .search-empty-state h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+  }
+  
+  .search-empty-state p {
+    font-size: 1rem;
+    margin-bottom: 1.5rem;
+    line-height: 1.6;
+  }
+  
+  /* Filter sidebar improvements */
+  .search-filters-sidebar {
+    position: sticky;
+    top: 2rem;
+    height: fit-content;
+  }
+  
+  /* Mobile filter panel improvements */
+  .mobile-filters-panel {
+    position: relative;
+    z-index: 1100;
+  }
+}
+
+/* Global dropdown styles that work across all components */
+.dropdown-menu-global {
+  position: absolute;
+  z-index: 1200;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.dark .dropdown-menu-global {
+  background: #374151;
+  border-color: #4b5563;
+}
+
+@media (min-width: 1440px) {
+  .dropdown-menu-global {
+    z-index: 1200;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  }
+}

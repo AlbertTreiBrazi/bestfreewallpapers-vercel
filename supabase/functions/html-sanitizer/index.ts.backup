@@ -1,0 +1,116 @@
+// HTML Sanitizer Edge Function
+// Provides HTML sanitization for guest ad HTML content
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Max-Age': '86400',
+}
+
+// Basic HTML sanitization function
+// This is a simple implementation - in production, consider using a more robust sanitizer
+function sanitizeHTML(html: string): string {
+  if (!html || typeof html !== 'string') {
+    return ''
+  }
+
+  // Remove potentially dangerous tags and attributes
+  const dangerousTags = [
+    'script', 'iframe', 'object', 'embed', 'form', 'input', 'button',
+    'meta', 'link', 'style', 'base', 'head', 'html', 'body'
+  ]
+  
+  const dangerousAttributes = [
+    'onload', 'onerror', 'onclick', 'onmouseover', 'onmouseout',
+    'onchange', 'onsubmit', 'onreset', 'onselect', 'onblur',
+    'onfocus', 'onkeydown', 'onkeypress', 'onkeyup', 'javascript:'
+  ]
+
+  let sanitized = html
+
+  // Remove dangerous tags (case insensitive)
+  dangerousTags.forEach(tag => {
+    const regex = new RegExp(`<\/?${tag}[^>]*>`, 'gi')
+    sanitized = sanitized.replace(regex, '')
+  })
+
+  // Remove dangerous attributes and javascript: protocols
+  dangerousAttributes.forEach(attr => {
+    const regex = new RegExp(`${attr}[^\s]*[="'][^"']*["']`, 'gi')
+    sanitized = sanitized.replace(regex, '')
+  })
+
+  // Remove any remaining javascript: protocols
+  sanitized = sanitized.replace(/javascript:/gi, '')
+  
+  // Remove any data: URIs except images
+  sanitized = sanitized.replace(/data:(?!image\/[a-zA-Z+]+;base64,)[^"'\s>]*/gi, '')
+
+  return sanitized.trim()
+}
+
+serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders })
+  }
+
+  try {
+    // Only allow POST requests
+    if (req.method !== 'POST') {
+      throw new Error('Method not allowed')
+    }
+
+    const { html } = await req.json()
+    
+    if (!html || typeof html !== 'string') {
+      throw new Error('HTML content is required')
+    }
+
+    if (html.length > 10000) { // 10KB limit for HTML content
+      throw new Error('HTML content too large (maximum 10KB)')
+    }
+
+    const sanitizedHTML = sanitizeHTML(html)
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          original: html,
+          sanitized: sanitizedHTML,
+          changed: html !== sanitizedHTML
+        }
+      }),
+      {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        }
+      }
+    )
+
+  } catch (error: any) {
+    console.error('HTML sanitization error:', error)
+    
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: {
+          code: 'SANITIZATION_ERROR',
+          message: error.message || 'Sanitization failed'
+        }
+      }),
+      {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        }
+      }
+    )
+  }
+})

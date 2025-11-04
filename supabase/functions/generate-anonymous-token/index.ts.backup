@@ -1,0 +1,103 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const { wallpaperId } = await req.json();
+
+        if (!wallpaperId) {
+            throw new Error('Wallpaper ID is required');
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Verify wallpaper exists and is available for anonymous download
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=id,is_premium,is_published,is_active`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpaper = wallpapers[0];
+
+        // Check if wallpaper is available for anonymous download
+        if (!wallpaper.is_published || !wallpaper.is_active) {
+            throw new Error('Wallpaper is not available');
+        }
+
+        if (wallpaper.is_premium) {
+            throw new Error('Premium wallpapers require account registration');
+        }
+
+        // Generate time-based token for anonymous download
+        const timestamp = Date.now();
+        const tokenData = `${wallpaperId}-${timestamp}`;
+        
+        // Create hash using service role key as secret
+        const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(tokenData + serviceRoleKey));
+        const hashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 16);
+        
+        const token = `${timestamp}-${hashHex}`;
+
+        console.log('Generated anonymous download token for wallpaper:', wallpaperId);
+
+        return new Response(JSON.stringify({
+            data: {
+                token: token,
+                wallpaperId: wallpaperId,
+                expiresAt: new Date(timestamp + 300000).toISOString(), // 5 minutes
+                isAnonymous: true
+            }
+        }), {
+            headers: {
+                ...corsHeaders,
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-cache, no-store, must-revalidate'
+            }
+        });
+
+    } catch (error) {
+        console.error('Anonymous token generation error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'TOKEN_GENERATION_FAILED',
+                message: error.message
+            }
+        };
+
+        const statusCode = error.message.includes('Premium wallpapers require') ? 403 :
+                          error.message.includes('not found') ? 404 : 500;
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: statusCode,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

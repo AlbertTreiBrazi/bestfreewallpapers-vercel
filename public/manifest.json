@@ -1,0 +1,39 @@
+{
+  "name": "Best Free Wallpapers",
+  "short_name": "BestWallpapers",
+  "description": "Discover stunning HD wallpapers and high-quality desktop backgrounds",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#9333ea",
+  "orientation": "portrait-primary",
+  "categories": ["entertainment", "lifestyle", "photo"],
+  "icons": [
+    {
+      "src": "/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Browse Wallpapers",
+      "short_name": "Browse",
+      "description": "Browse all wallpapers",
+      "url": "/wallpapers",
+      "icons": [{ "src": "/icons/browse-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "Categories",
+      "short_name": "Categories",
+      "description": "Browse by category",
+      "url": "/wallpapers?view=categories",
+      "icons": [{ "src": "/icons/categories-96x96.png", "sizes": "96x96" }]
+    }
+  ]
+}

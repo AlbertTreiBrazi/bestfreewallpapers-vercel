@@ -1,0 +1,513 @@
+import React, { useState, useEffect, useRef } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
+import { useTheme } from '@/contexts/ThemeContext'
+import { SEOHead } from '@/components/seo/SEOHead'
+import { Search, Grid, ArrowRight, Tag, RefreshCw } from 'lucide-react'
+
+import { serializeError } from '@/utils/errorFormatting'
+
+interface Category {
+  id: string
+  name: string
+  slug: string
+  preview_image?: string
+  preview_wallpaper_id?: string
+  preview_wallpaper_image_url?: string
+  wallpaper_count?: number
+}
+
+// Client-side cache for categories
+let categoriesCache: Category[] | null = null
+let categoriesCacheTimestamp = 0
+const CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
+
+// Generate a consistent color based on category name
+function getCategoryColor(categoryName: string): string {
+  const colors = [
+    'from-purple-500 to-blue-500',
+    'from-blue-500 to-teal-500', 
+    'from-teal-500 to-green-500',
+    'from-green-500 to-yellow-500',
+    'from-yellow-500 to-orange-500',
+    'from-orange-500 to-red-500',
+    'from-red-500 to-pink-500',
+    'from-pink-500 to-purple-500',
+    'from-indigo-500 to-purple-500',
+    'from-cyan-500 to-blue-500'
+  ]
+  
+  let hash = 0
+  for (let i = 0; i < categoryName.length; i++) {
+    hash = categoryName.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  
+  return colors[Math.abs(hash) % colors.length]
+}
+
+// Generate category icon based on name/slug
+function getCategoryIcon(categoryName: string, slug: string) {
+  const name = categoryName.toLowerCase()
+  const categorySlug = slug.toLowerCase()
+  
+  // Nature/Landscape
+  if (name.includes('nature') || name.includes('landscape') || name.includes('mountain') || 
+      name.includes('forest') || name.includes('ocean') || name.includes('beach')) {
+    return '🌿'
+  }
+  
+  // Space/Galaxy
+  if (name.includes('space') || name.includes('galaxy') || name.includes('star') || 
+      name.includes('planet') || name.includes('cosmic')) {
+    return '🌌'
+  }
+  
+  // Animals
+  if (name.includes('animal') || name.includes('cat') || name.includes('dog') || 
+      name.includes('bird') || name.includes('wild')) {
+    return '🐾'
+  }
+  
+  // Technology
+  if (name.includes('tech') || name.includes('cyber') || name.includes('digital') || 
+      name.includes('ai') || name.includes('robot')) {
+    return '💻'
+  }
+  
+  // Gaming
+  if (name.includes('game') || name.includes('gaming') || categorySlug.includes('game')) {
+    return '🎮'
+  }
+  
+  // Anime/Kawaii
+  if (name.includes('anime') || name.includes('kawaii') || name.includes('chibi')) {
+    return '🌸'
+  }
+  
+  // Cars/Automotive
+  if (name.includes('car') || name.includes('bmw') || name.includes('tesla') || 
+      name.includes('ferrari') || name.includes('auto')) {
+    return '🚗'
+  }
+  
+  // Abstract/Art
+  if (name.includes('abstract') || name.includes('art') || name.includes('paint')) {
+    return '🎨'
+  }
+  
+  // Music
+  if (name.includes('music') || name.includes('guitar') || name.includes('piano')) {
+    return '🎵'
+  }
+  
+  // Food
+  if (name.includes('food') || name.includes('coffee') || name.includes('pizza')) {
+    return '🍕'
+  }
+  
+  // Colors
+  if (name.includes('red') || name.includes('blue') || name.includes('green') || 
+      name.includes('yellow') || name.includes('purple') || name.includes('pink')) {
+    return '🎨'
+  }
+  
+  // Default
+  return '✨'
+}
+
+export function CategoriesPage() {
+  const { theme } = useTheme()
+  const navigate = useNavigate()
+  const [categories, setCategories] = useState<Category[]>(categoriesCache || [])
+  const [loading, setLoading] = useState(false)
+  const [isDataLoaded, setIsDataLoaded] = useState(!!categoriesCache)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [error, setError] = useState<string | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    // Check cache first
+    const now = Date.now()
+    if (categoriesCache && (now - categoriesCacheTimestamp) < CACHE_DURATION) {
+      // Use cached data immediately
+      setCategories(categoriesCache)
+      setIsDataLoaded(true)
+      return
+    }
+
+    // Load fresh data
+    loadCategories()
+  }, [])
+
+  useEffect(() => {
+    // Cleanup on unmount
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
+
+  const loadCategories = async () => {
+    try {
+      setLoading(!categoriesCache) // Only show loading if no cache
+      setError(null)
+      
+      // Cancel any ongoing request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+      
+      // Create new abort controller for this request
+      abortControllerRef.current = new AbortController()
+      
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/categories-api`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({}),
+          signal: abortControllerRef.current.signal
+        }
+      )
+      
+      if (response.ok) {
+        const result = await response.json()
+        
+        const categoriesWithCount = (result.data || []).map((category: any) => ({
+          ...category,
+          wallpaper_count: category.wallpaper_count || 0
+        }))
+        
+        // Update cache
+        categoriesCache = categoriesWithCount
+        categoriesCacheTimestamp = Date.now()
+        
+        setCategories(categoriesWithCount)
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+    } catch (error: any) {
+      // Don't show error if request was aborted
+      if (error.name !== 'AbortError') {
+        console.error('Error loading categories:', error)
+        setError('Failed to load categories. Please try again.')
+        
+        // Keep existing categories if we have them from cache
+        if (!categoriesCache) {
+          setCategories([])
+        }
+      }
+    } finally {
+      setIsDataLoaded(true)
+      setLoading(false)
+    }
+  }
+
+  const handleCategoryClick = (category: Category) => {
+    // Database category - direct navigation to dedicated category page
+    navigate(`/category/${category.slug}`)
+  }
+
+  const filteredCategories = categories.filter(category =>
+    category.name.toLowerCase().includes(searchQuery.toLowerCase())
+  )
+
+  // Removed popular categories filtering - only using curated categories
+
+  // SEO configuration
+  const seoConfig = {
+    title: 'Browse All Categories - Free HD Wallpapers | BestFreeWallpapers',
+    description: `Explore ${categories.length}+ curated categories of free HD wallpapers. Find the perfect desktop background from our extensive collection of high-quality images.`,
+    keywords: ['wallpaper categories', 'browse wallpapers', 'wallpaper collections', 'HD backgrounds', 'desktop wallpapers', 'curated categories'],
+    image: '/images/og-categories.jpg'
+  }
+
+  return (
+    <div className={`min-h-screen ${theme === 'dark' ? 'bg-dark-primary' : 'bg-gray-50'} transition-colors duration-200`}>
+      <SEOHead config={seoConfig} />
+      
+      {/* Header Section */}
+      <div className={`${theme === 'dark' ? 'bg-dark-secondary border-dark-border' : 'bg-white border-gray-200'} border-b transition-colors duration-200`}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+          <div className="text-center mb-6 sm:mb-8">
+            <h1 className={`text-2xl sm:text-3xl md:text-4xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'} mb-3 sm:mb-4 transition-colors duration-200`}>
+              Browse Curated Categories
+            </h1>
+            <p className={`text-base sm:text-lg ${theme === 'dark' ? 'text-gray-300' : 'text-gray-600'} mb-4 sm:mb-6 px-2 transition-colors duration-200`}>
+              {categories.length > 0 ? (
+                `Discover wallpapers from ${categories.length} curated categories`
+              ) : loading ? (
+                'Loading our extensive collection of curated categories...'
+              ) : (
+                'Discover wallpapers from our extensive collection of curated categories'
+              )}
+            </p>
+            
+            {/* Search Bar */}
+            <div className="max-w-2xl mx-auto mb-4 sm:mb-6">
+              <div className="relative">
+                <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`} />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search categories..."
+                  className={`w-full pl-10 pr-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-transparent min-h-[44px] ${theme === 'dark' ? 'bg-dark-tertiary border-dark-border text-white placeholder-gray-400' : 'bg-white border-gray-300 text-gray-900 placeholder-gray-500'} transition-colors duration-200`}
+                />
+              </div>
+            </div>
+            
+            {/* View Mode Toggle */}
+            <div className="flex items-center justify-center space-x-2">
+              <button
+                onClick={() => setViewMode('grid')}
+                className={`p-3 rounded-lg transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center ${viewMode === 'grid' ? 'bg-gray-100 text-gray-600 dark:bg-purple-900 dark:text-purple-300' : theme === 'dark' ? 'text-gray-400 hover:text-gray-300 hover:bg-dark-tertiary' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                aria-label="Grid view"
+              >
+                <Grid className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={`p-3 rounded-lg transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center ${viewMode === 'list' ? 'bg-gray-100 text-gray-600 dark:bg-purple-900 dark:text-purple-300' : theme === 'dark' ? 'text-gray-400 hover:text-gray-300 hover:bg-dark-tertiary' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                aria-label="List view"
+              >
+                <Tag className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        
+        {/* Popular Themes Section - REMOVED */}
+        {/* Keeping only curated categories for cleaner navigation */}
+
+        {/* Database Categories Section */}
+        <div>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 sm:mb-6 gap-3">
+            <h2 className={`text-xl sm:text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-gray-900'} transition-colors duration-200`}>
+              Curated Categories {categories.length > 0 && `(${filteredCategories.length})`}
+            </h2>
+            <div className={`text-xs sm:text-sm ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'} bg-green-100 dark:bg-green-900/30 px-3 py-1.5 rounded-full self-start`}>
+              📂 Dedicated pages
+            </div>
+          </div>
+          
+          {loading ? (
+            <div className={viewMode === 'grid' ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4' : 'space-y-2'}>
+              {[...Array(12)].map((_, i) => (
+                <div key={i} className={`animate-pulse ${viewMode === 'grid' ? 
+                  `${theme === 'dark' ? 'bg-dark-secondary' : 'bg-white'} rounded-lg p-4 border` :
+                  `${theme === 'dark' ? 'bg-dark-secondary' : 'bg-white'} rounded-lg p-4 border`
+                }`}>
+                  {viewMode === 'grid' ? (
+                    <>
+                      <div className={`w-12 h-12 ${theme === 'dark' ? 'bg-dark-tertiary' : 'bg-gray-200'} rounded-lg mx-auto mb-2`}></div>
+                      <div className={`h-4 ${theme === 'dark' ? 'bg-dark-tertiary' : 'bg-gray-200'} rounded mb-1`}></div>
+                      <div className={`h-3 ${theme === 'dark' ? 'bg-dark-tertiary' : 'bg-gray-200'} rounded w-2/3 mx-auto`}></div>
+                    </>
+                  ) : (
+                    <div className={`h-4 ${theme === 'dark' ? 'bg-dark-tertiary' : 'bg-gray-200'} rounded`}></div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : error ? (
+            <div className="text-center py-12">
+              <RefreshCw className={`w-16 h-16 mx-auto mb-4 ${theme === 'dark' ? 'text-red-400' : 'text-red-500'}`} />
+              <h3 className={`text-lg font-semibold ${theme === 'dark' ? 'text-white' : 'text-gray-900'} mb-2 transition-colors duration-200`}>
+                Unable to load categories
+              </h3>
+              <p className={`${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} mb-4 transition-colors duration-200`}>
+                {serializeError(error)}
+              </p>
+              <button
+                onClick={() => loadCategories()}
+                className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Try Again
+              </button>
+            </div>
+          ) : filteredCategories.length > 0 ? (
+            <div className={viewMode === 'grid' ? 
+              'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4' :
+              'space-y-2'
+            }>
+              {filteredCategories.map((category) => {
+                const previewImageUrl = category.preview_wallpaper_image_url ||
+                  category.preview_image
+                
+                return (
+                  <button
+                    key={category.id}
+                    onClick={() => handleCategoryClick(category)}
+                    className={`${viewMode === 'grid' ? 
+                      `group ${theme === 'dark' ? 'bg-dark-secondary hover:bg-dark-tertiary border-dark-border' : 'bg-white hover:bg-gray-50 border-gray-200'} border rounded-lg overflow-hidden transition-all duration-300 hover:shadow-lg hover:scale-105 relative` :
+                      `flex items-center justify-between px-4 py-3 ${theme === 'dark' ? 'bg-dark-secondary hover:bg-dark-tertiary border-dark-border' : 'bg-white hover:bg-gray-50 border-gray-200'} border rounded-lg transition-colors duration-200`
+                    }`}
+                    title={`Browse ${category.name} category page`}
+                  >
+                    {viewMode === 'grid' ? (
+                      <>
+                        <div className="aspect-square overflow-hidden mb-3 relative">
+                          {previewImageUrl ? (
+                            <>
+                              <img
+                                src={previewImageUrl}
+                                alt={category.name}
+                                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110"
+                                loading="lazy"
+                                onError={(e) => {
+                                  const target = e.currentTarget as HTMLImageElement;
+                                  const fallback = target.parentElement?.querySelector('.fallback-bg') as HTMLElement;
+                                  if (fallback) {
+                                    target.style.display = 'none';
+                                    fallback.style.display = 'flex';
+                                  }
+                                }}
+                              />
+                              <div className={`fallback-bg absolute inset-0 bg-gradient-to-br ${getCategoryColor(category.name)} hidden items-center justify-center`}>
+                                {/* Background pattern */}
+                                <div className="absolute inset-0 opacity-10">
+                                  <div className="w-full h-full" style={{
+                                    backgroundImage: `radial-gradient(circle at 20% 50%, white 2px, transparent 2px),
+                                                     radial-gradient(circle at 80% 50%, white 2px, transparent 2px)`,
+                                    backgroundSize: '20px 20px'
+                                  }} />
+                                </div>
+                                {/* Main content */}
+                                <div className="relative z-10 text-center text-white">
+                                  <div className="text-3xl mb-1 group-hover:scale-110 transition-transform duration-300">
+                                    {getCategoryIcon(category.name, category.slug)}
+                                  </div>
+                                </div>
+                                {/* Shimmer effect */}
+                                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                              </div>
+                            </>
+                          ) : (
+                            <div className={`w-full h-full bg-gradient-to-br ${getCategoryColor(category.name)} flex items-center justify-center transition-colors duration-200 group relative overflow-hidden`}>
+                              {/* Background pattern */}
+                              <div className="absolute inset-0 opacity-10">
+                                <div className="w-full h-full" style={{
+                                  backgroundImage: `radial-gradient(circle at 20% 50%, white 2px, transparent 2px),
+                                                   radial-gradient(circle at 80% 50%, white 2px, transparent 2px)`,
+                                  backgroundSize: '20px 20px'
+                                }} />
+                              </div>
+                              {/* Main content */}
+                              <div className="relative z-10 text-center text-white">
+                                <div className="text-3xl mb-1 group-hover:scale-110 transition-transform duration-300">
+                                  {getCategoryIcon(category.name, category.slug)}
+                                </div>
+                              </div>
+                              {/* Shimmer effect */}
+                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-2.5 sm:p-3">
+                          <h3 className={`font-semibold ${theme === 'dark' ? 'text-white group-hover:text-gray-400' : 'text-gray-900 group-hover:text-gray-600'} mb-0.5 sm:mb-1 transition-colors duration-200 text-xs sm:text-sm leading-tight line-clamp-2`}>
+                            {category.name}
+                          </h3>
+                          <p className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} transition-colors duration-200`}>
+                            {category.wallpaper_count || 0} {(category.wallpaper_count || 0) === 1 ? 'wallpaper' : 'wallpapers'}
+                          </p>
+                        </div>
+                        <div className="absolute top-2 right-2 text-xs opacity-70" title="Dedicated page">
+                          📄
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center space-x-3 min-h-[44px]">
+                          <div className="w-10 h-10 flex-shrink-0 rounded-lg overflow-hidden relative">
+                            {previewImageUrl ? (
+                              <>
+                                <img
+                                  src={previewImageUrl}
+                                  alt={category.name}
+                                  className="w-full h-full object-cover"
+                                  loading="lazy"
+                                  onError={(e) => {
+                                    const target = e.currentTarget as HTMLImageElement;
+                                    const fallback = target.parentElement?.querySelector('.list-fallback') as HTMLElement;
+                                    if (fallback) {
+                                      target.style.display = 'none';
+                                      fallback.style.display = 'flex';
+                                    }
+                                  }}
+                                />
+                                <div className={`list-fallback absolute inset-0 bg-gradient-to-br ${getCategoryColor(category.name)} items-center justify-center hidden`}>
+                                  <div className="text-white text-sm">
+                                    {getCategoryIcon(category.name, category.slug)}
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <div className={`w-full h-full bg-gradient-to-br ${getCategoryColor(category.name)} flex items-center justify-center transition-colors duration-200`}>
+                                <div className="text-white text-sm">
+                                  {getCategoryIcon(category.name, category.slug)}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-left flex-1 min-w-0">
+                            <h3 className={`font-medium text-sm sm:text-base ${theme === 'dark' ? 'text-white' : 'text-gray-900'} transition-colors duration-200 truncate`}>
+                              {category.name}
+                            </h3>
+                            <p className={`text-xs sm:text-sm ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} transition-colors duration-200`}>
+                              {category.wallpaper_count || 0} wallpapers
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2 flex-shrink-0">
+                          <span className="text-xs opacity-70 hidden sm:inline" title="Dedicated page">📄</span>
+                          <ArrowRight className={`w-4 h-4 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`} />
+                        </div>
+                      </>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <Tag className={`w-16 h-16 mx-auto mb-4 ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`} />
+              <h3 className={`text-lg font-semibold ${theme === 'dark' ? 'text-white' : 'text-gray-900'} mb-2 transition-colors duration-200`}>
+                {searchQuery ? 'No categories found' : 'Loading categories...'}
+              </h3>
+              <p className={`${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'} mb-4 transition-colors duration-200`}>
+                {searchQuery ? (
+                  <>No categories match your search "{searchQuery}"</>
+                ) : (
+                  'Please wait while we load the categories'
+                )}
+              </p>
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="text-gray-600 hover:text-gray-700 font-semibold transition-colors duration-200"
+                >
+                  Clear search
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+
+export default CategoriesPage

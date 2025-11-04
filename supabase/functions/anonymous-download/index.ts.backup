@@ -1,0 +1,230 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const { wallpaperId, token } = await req.json();
+
+        console.log('Anonymous download request:', { wallpaperId, token });
+
+        if (!wallpaperId || !token) {
+            throw new Error('Missing required parameters: wallpaper ID and token');
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Verify the token (simple time-based token for anonymous downloads)
+        const tokenParts = token.split('-');
+        if (tokenParts.length !== 2) {
+            throw new Error('Invalid download token format');
+        }
+
+        const timestamp = parseInt(tokenParts[0]);
+        const hash = tokenParts[1];
+        
+        // Check if token is expired (5 minutes)
+        const now = Date.now();
+        if (now - timestamp > 300000) {
+            throw new Error('Download token has expired');
+        }
+
+        // Verify token hash
+        const expectedData = `${wallpaperId}-${timestamp}`;
+        const expectedHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(expectedData + serviceRoleKey));
+        const expectedHashHex = Array.from(new Uint8Array(expectedHash)).map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 16);
+        
+        if (hash !== expectedHashHex) {
+            throw new Error('Invalid download token');
+        }
+
+        // Rate limiting for anonymous downloads (per IP)
+        const clientIp = req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for') || 'unknown';
+        
+        // Check IP-based rate limit (5 downloads per 20 minutes for anonymous users)
+        const twentyMinutesAgo = new Date(now - 20 * 60 * 1000);
+        
+        const rateLimitResponse = await fetch(`${supabaseUrl}/rest/v1/downloads?ip_address=eq.${clientIp}&created_at=gte.${twentyMinutesAgo.toISOString()}&user_id=is.null&select=id`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (rateLimitResponse.ok) {
+            const recentDownloads = await rateLimitResponse.json();
+            if (recentDownloads.length >= 5) {
+                throw new Error('Download limit reached. Anonymous users can download 5 wallpapers per 20 minutes.');
+            }
+        }
+
+        // Get wallpaper data
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=id,title,is_premium,is_published,is_active,download_count,categories(slug)`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpaper = wallpapers[0];
+
+        // Check if wallpaper is available
+        if (!wallpaper.is_published || !wallpaper.is_active) {
+            throw new Error('Wallpaper is not available');
+        }
+
+        // Anonymous users can only access free wallpapers
+        if (wallpaper.is_premium) {
+            throw new Error('Premium wallpapers require account registration and subscription');
+        }
+
+        // Generate download URL for anonymous users (optimized storage)
+        const categorySlug = wallpaper.categories?.slug || 'uncategorized';
+        const filePath = `original/${categorySlug}/${wallpaperId}.jpg`;
+        
+        // Try optimized path first
+        let downloadUrl = null;
+        const signedUrlResponse = await fetch(`${supabaseUrl}/storage/v1/object/sign/wallpapers-original/${filePath}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                expiresIn: 900 // 15 minutes
+            })
+        });
+
+        if (signedUrlResponse.ok) {
+            const signedUrlData = await signedUrlResponse.json();
+            downloadUrl = `${supabaseUrl}${signedUrlData.signedURL}`;
+            console.log('Using optimized storage path for anonymous download');
+        } else {
+            // Fallback to legacy paths
+            const legacyPaths = [
+                `${wallpaperId}.jpg`,
+                `wallpapers/${wallpaperId}.jpg`,
+                `original/${wallpaperId}.jpg`
+            ];
+            
+            for (const legacyPath of legacyPaths) {
+                const legacyResponse = await fetch(`${supabaseUrl}/storage/v1/object/sign/wallpapers-original/${legacyPath}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        expiresIn: 900
+                    })
+                });
+                
+                if (legacyResponse.ok) {
+                    const signedUrlData = await legacyResponse.json();
+                    downloadUrl = `${supabaseUrl}${signedUrlData.signedURL}`;
+                    console.log('Using legacy path for anonymous download:', legacyPath);
+                    break;
+                }
+            }
+        }
+
+        if (!downloadUrl) {
+            throw new Error('File not found in storage');
+        }
+
+        // Log the anonymous download
+        const logResponse = await fetch(`${supabaseUrl}/rest/v1/downloads`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                user_id: null, // Anonymous
+                wallpaper_id: parseInt(wallpaperId),
+                resolution: '1080p',
+                download_type: 'anonymous',
+                ip_address: clientIp,
+                user_agent: req.headers.get('user-agent') || 'unknown'
+            })
+        });
+
+        // Update download count (non-blocking)
+        if (logResponse.ok) {
+            fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    download_count: (wallpaper.download_count || 0) + 1
+                })
+            }).catch(err => console.log('Download count update failed:', err.message));
+        }
+
+        console.log('Anonymous download successful for wallpaper:', wallpaperId);
+
+        return new Response(JSON.stringify({
+            data: {
+                downloadUrl: downloadUrl,
+                filename: `${wallpaper.title.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_')}-1080p.jpg`,
+                expiresAt: new Date(Date.now() + 900 * 1000).toISOString(),
+                wallpaperTitle: wallpaper.title
+            }
+        }), {
+            headers: {
+                ...corsHeaders,
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-cache, no-store, must-revalidate'
+            }
+        });
+
+    } catch (error) {
+        console.error('Anonymous download error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'ANONYMOUS_DOWNLOAD_FAILED',
+                message: error.message
+            }
+        };
+
+        const statusCode = error.message.includes('Premium wallpapers require') ? 403 :
+                          error.message.includes('Download limit reached') ? 429 :
+                          error.message.includes('not found') ? 404 :
+                          error.message.includes('expired') ? 410 : 500;
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: statusCode,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

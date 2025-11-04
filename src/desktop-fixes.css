@@ -1,0 +1,138 @@
+/* Desktop-Only Bug Fixes for 1440px+ Screens */
+/* These fixes address specific issues on desktop without affecting mobile layout */
+
+@media (min-width: 1440px) {
+  /* Fix category dropdown clipping issues */
+  .categories-dropdown-container {
+    position: relative;
+    overflow: visible !important;
+  }
+  
+  /* Ensure dropdowns are never clipped by parent containers */
+  .dropdown-menu-desktop {
+    position: fixed !important;
+    z-index: 1200 !important;
+  }
+  
+  /* Fix category card image containers */
+  .category-card-container {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  /* Prevent broken image icons from showing */
+  .category-card-container img:not([src]),
+  .category-card-container img[src=""],
+  .category-card-container img[src*="undefined"],
+  .category-card-container img[src*="null"] {
+    display: none !important;
+  }
+  
+  /* Ensure category placeholders are visible when images fail */
+  .category-placeholder {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  /* Fix search filter dropdowns */
+  .search-filters-container {
+    position: relative;
+    overflow: visible;
+  }
+  
+  /* Prevent parent containers from clipping dropdowns */
+  .main-content-wrapper,
+  .search-page-container,
+  .category-tab-wrapper {
+    overflow: visible !important;
+  }
+  
+  /* Enhanced dropdown shadow for better visibility */
+  .desktop-dropdown {
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04) !important;
+  }
+  
+  /* Fix category filter empty state messaging */
+  .search-empty-state {
+    padding: 3rem 1rem;
+  }
+  
+  /* Ensure category thumbnails load gracefully */
+  .category-thumbnail {
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+  
+  /* Category image error handling */
+  .category-thumbnail img {
+    opacity: 1;
+    transition: opacity 0.3s ease;
+  }
+  
+  .category-thumbnail img:not([src]),
+  .category-thumbnail img[src=""],
+  .category-thumbnail img[src*="undefined"],
+  .category-thumbnail img[src*="null"],
+  .category-thumbnail img.error {
+    opacity: 0;
+    pointer-events: none;
+  }
+  
+  /* Fix z-index stacking context issues */
+  .header-container {
+    z-index: 1000;
+  }
+  
+  .dropdown-container {
+    z-index: 1200;
+  }
+  
+  .overlay-backdrop {
+    z-index: 1199;
+  }
+}
+
+/* Global fixes that need to be applied regardless of screen size but only affect desktop behavior */
+.prevent-dropdown-clip {
+  overflow: visible !important;
+}
+
+/* Image loading error states */
+img.broken-image {
+  display: none !important;
+}
+
+/* Category card improvements */
+.category-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.category-card .image-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.category-card .image-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #f3e8ff 0%, #e0e7ff 100%);
+}
+
+.dark .category-card .image-placeholder {
+  background: linear-gradient(135deg, #4c1d95 0%, #1e3a8a 100%);
+}

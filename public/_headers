@@ -1,0 +1,104 @@
+/*
+  # Global Security Headers - PERFORMANCE OPTIMIZED (Phase 3.6.2 Critical Performance Fix)
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  Content-Security-Policy: default-src 'self'; img-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://eocgtrggcalfptqhgxer.supabase.co wss://eocgtrggcalfptqhgxer.supabase.co https://turnstile.cloudflare.com; media-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; upgrade-insecure-requests
+  X-Frame-Options: SAMEORIGIN
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), fullscreen=(self), clipboard-read=(self), clipboard-write=(self)
+  X-XSS-Protection: 1; mode=block
+  # Performance Optimizations
+  Accept-Encoding: gzip, br, deflate
+  Vary: Accept-Encoding
+  # Default caching for non-specified resources
+  Cache-Control: public, max-age=3600
+
+# HTML pages - no-cache for fresh content but allow compression
+/*.html
+  Cache-Control: no-cache, must-revalidate
+  Accept-Encoding: gzip, br, deflate
+
+# Compressed JavaScript files - prioritize Brotli then Gzip
+/assets/*.js.br
+  Content-Type: application/javascript
+  Content-Encoding: br
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/*.js.gz
+  Content-Type: application/javascript
+  Content-Encoding: gzip
+  Cache-Control: public, max-age=31536000, immutable
+
+# Compressed CSS files
+/assets/*.css.br
+  Content-Type: text/css
+  Content-Encoding: br
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/*.css.gz
+  Content-Type: text/css
+  Content-Encoding: gzip
+  Cache-Control: public, max-age=31536000, immutable
+
+# Static assets - aggressive caching with compression
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+  Accept-Encoding: gzip, br, deflate
+
+/images/*
+  Cache-Control: public, max-age=31536000, immutable
+  Accept-Encoding: gzip, br, deflate
+
+/icons/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# JavaScript and CSS bundles - immutable with long-term caching
+/assets/*.js
+  Content-Type: application/javascript; charset=utf-8
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/*.css
+  Content-Type: text/css; charset=utf-8
+  Cache-Control: public, max-age=31536000, immutable
+
+# Font files - immutable with long-term caching
+/*.woff2
+  Cache-Control: public, max-age=31536000, immutable
+
+/*.woff
+  Cache-Control: public, max-age=31536000, immutable
+
+/*.ttf
+  Cache-Control: public, max-age=31536000, immutable
+
+# Service worker - no-cache
+/sw.js
+  Content-Type: application/javascript; charset=utf-8
+  Cache-Control: no-cache, must-revalidate
+
+/sw-advanced.js
+  Content-Type: application/javascript; charset=utf-8
+  Cache-Control: no-cache, must-revalidate
+
+/sw-security.js
+  Content-Type: application/javascript; charset=utf-8
+  Cache-Control: no-cache, must-revalidate
+
+# Favicons and manifest
+/favicon.ico
+  Cache-Control: public, max-age=86400
+
+/manifest.json
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: public, max-age=86400
+
+/site.webmanifest
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: public, max-age=86400
+
+# API and auth routes - no-store
+/api/*
+  Cache-Control: no-store
+
+/auth/*
+  Cache-Control: no-store

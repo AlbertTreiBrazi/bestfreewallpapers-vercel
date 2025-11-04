@@ -1,0 +1,878 @@
+/* Import all CSS modules */
+@import './desktop-fixes.css';
+@import './desktop-components.css';
+@import './mobile-fixes.css';
+@import './accessibility.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Status Badge Styles */
+.status-badge {
+  @apply px-2 py-1 text-xs font-medium rounded-full;
+}
+
+.status-active {
+  @apply bg-green-100 text-green-800;
+}
+
+.status-inactive {
+  @apply bg-red-100 text-red-800;
+}
+
+.status-featured {
+  @apply bg-blue-100 text-blue-800;
+}
+
+/* Dark theme support */
+.dark .status-active {
+  @apply bg-green-900 text-green-200;
+}
+
+.dark .status-inactive {
+  @apply bg-red-900 text-red-200;
+}
+
+.dark .status-featured {
+  @apply bg-blue-900 text-blue-200;
+}
+
+/* Wallpaper Detail Page - Protected Image Display with Hover Effects */
+.wallpaper-image-display {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+  border: 1px solid #000000;
+  margin: 1px;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.wallpaper-image-display:hover {
+  transform: scale(1.02);
+}
+
+/* Additional protection against image saving attempts */
+.wallpaper-image-display::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* Prevent text selection on the entire image container */
+.wallpaper-image-display * {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* PRIORITY 1: Kill Horizontal Wiggle - Enhanced Global Protection */
+@media (max-width: 768px) {
+  html,
+  body {
+    overflow-x: hidden !important;
+    overscroll-behavior-x: none;
+    max-width: 100vw;
+  }
+  
+  /* Prevent any element from causing horizontal overflow */
+  *,
+  *::before,
+  *::after {
+    max-width: 100vw;
+    box-sizing: border-box;
+  }
+  
+  /* Specific protection for common overflow elements */
+  .container,
+  .max-w-7xl,
+  .mx-auto {
+    max-width: 100vw !important;
+    overflow-x: hidden;
+  }
+  
+  /* Safe area insets for notch phones */
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+/* CSS Custom Properties for Consistent Spacing (8px scale) */
+:root {
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-2xl: 32px;
+  --spacing-3xl: 48px;
+  
+  /* Safe area insets for notch phones */
+  --safe-area-top: env(safe-area-inset-top);
+  --safe-area-bottom: env(safe-area-inset-bottom);
+  --safe-area-left: env(safe-area-inset-left);
+  --safe-area-right: env(safe-area-inset-right);
+}
+
+/* Enhanced Body Scroll Lock for Perfect Modal Behavior */
+.modal-open {
+  overflow: hidden !important;
+  position: fixed;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+/* Modal centering and z-index management */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+
+.modal-content {
+  position: relative;
+  z-index: 51;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+/* Ensure default dark theme loads immediately */
+html {
+  background-color: #111827;
+  color: #f9fafb;
+}
+
+body {
+  background-color: #111827;
+  color: #f9fafb;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  /* Prevent horizontal scroll globally */
+  overflow-x: hidden;
+}
+
+/* Root element styling to prevent white flash */
+#root {
+  min-height: 100vh;
+  background-color: inherit;
+  /* Ensure no horizontal overflow */
+  overflow-x: hidden;
+  width: 100%;
+}
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%
+  }
+
+  .dark {
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%
+  }
+}
+
+/* Light Theme (Default) - Applied to html.light or body.light */
+html.light,
+body.light,
+.light {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-tertiary: #f1f5f9;
+  --bg-surface: #ffffff;
+  --bg-card: #ffffff;
+  --bg-modal: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.5);
+  --text-primary: #1f2937;
+  --text-secondary: #6b7280;
+  --text-tertiary: #9ca3af;
+  --text-muted: #9ca3af;
+  --text-placeholder: #9ca3af;
+  --border-color: #e5e7eb;
+  --border-light: #f3f4f6;
+  --border-focus: #3b82f6;
+  --input-bg: #ffffff;
+  --input-border: #d1d5db;
+  --input-focus: #3b82f6;
+  --select-bg: #ffffff;
+  --button-primary: #374151;
+  --button-secondary: #f3f4f6;
+  --button-danger: #ef4444;
+  --accent-primary: #374151;
+  --accent-blue: #3b82f6;
+  --accent-green: #10b981;
+  --accent-red: #ef4444;
+  --accent-yellow: #f59e0b;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+  --status-info: #3b82f6;
+  background-color: #ffffff;
+  color: #1f2937;
+}
+
+/* Dark Theme - Applied to html.dark or body.dark */
+html.dark,
+body.dark,
+.dark {
+  --bg-primary: #111827;
+  --bg-secondary: #1f2937;
+  --bg-tertiary: #374151;
+  --bg-surface: #1f2937;
+  --bg-card: #1f2937;
+  --bg-modal: #1f2937;
+  --bg-overlay: rgba(0, 0, 0, 0.8);
+  --text-primary: #f9fafb;
+  --text-secondary: #d1d5db;
+  --text-tertiary: #9ca3af;
+  --text-muted: #6b7280;
+  --text-placeholder: #6b7280;
+  --border-color: #374151;
+  --border-light: #4b5563;
+  --border-focus: #60a5fa;
+  --input-bg: #374151;
+  --input-border: #4b5563;
+  --input-focus: #60a5fa;
+  --select-bg: #374151;
+  --button-primary: #4b5563;
+  --button-secondary: #374151;
+  --button-danger: #f87171;
+  --accent-primary: #4b5563;
+  --accent-blue: #60a5fa;
+  --accent-green: #34d399;
+  --accent-red: #f87171;
+  --accent-yellow: #fbbf24;
+  --status-success: #34d399;
+  --status-warning: #fbbf24;
+  --status-error: #f87171;
+  --status-info: #60a5fa;
+  --dark-primary: #111827;
+  --dark-secondary: #1f2937;
+  --dark-tertiary: #374151;
+  --dark-border: #374151;
+  background-color: #111827;
+  color: #f9fafb;
+}
+
+/* Remove conflicting body styles - these are now handled by theme classes */
+
+/* Universal Dark Mode Coverage */
+.dark * {
+  border-color: #333 !important;
+}
+
+.dark .bg-white {
+  background-color: #111827 !important;
+}
+
+.dark .bg-gray-50 {
+  background-color: #1f2937 !important;
+}
+
+.dark .bg-gray-100 {
+  background-color: #374151 !important;
+}
+
+.dark .bg-gray-200 {
+  background-color: #4b5563 !important;
+}
+
+.dark .text-gray-900 {
+  color: #ffffff !important;
+}
+
+.dark .text-gray-800 {
+  color: #f9fafb !important;
+}
+
+.dark .text-gray-700 {
+  color: #e5e7eb !important;
+}
+
+.dark .text-gray-600 {
+  color: #d1d5db !important;
+}
+
+.dark .text-gray-500 {
+  color: #9ca3af !important;
+}
+
+/* Comprehensive Form Component Styling */
+.dark input[type="text"],
+.dark input[type="email"],
+.dark input[type="password"],
+.dark input[type="search"],
+.dark input[type="url"],
+.dark input[type="tel"],
+.dark input[type="number"],
+.dark input[type="file"],
+.dark textarea,
+.dark select {
+  background-color: #374151 !important;
+  border-color: #4b5563 !important;
+  color: #f9fafb !important;
+}
+
+.dark input[type="text"]:focus,
+.dark input[type="email"]:focus,
+.dark input[type="password"]:focus,
+.dark input[type="search"]:focus,
+.dark input[type="url"]:focus,
+.dark input[type="tel"]:focus,
+.dark input[type="number"]:focus,
+.dark input[type="file"]:focus,
+.dark textarea:focus,
+.dark select:focus {
+  border-color: #60a5fa !important;
+  ring-color: #60a5fa !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #9ca3af !important;
+}
+
+/* Fix file input "No file chosen" text visibility */
+.dark input[type="file"]::file-selector-button {
+  background-color: #4b5563 !important;
+  color: #f9fafb !important;
+  border-color: #6b7280 !important;
+}
+
+/* Dropdown and Modal Styling */
+.dark .dropdown-menu,
+.dark .modal-content,
+.dark .popover-content {
+  background-color: #1f1f1f !important;
+  border-color: #333 !important;
+}
+
+.dark .dropdown-item:hover,
+.dark .filter-chip:hover {
+  background-color: #2a2a2a !important;
+}
+
+/* Filter Chips and Interactive Elements */
+.dark .filter-chip {
+  background-color: #1f1f1f !important;
+  border-color: #333 !important;
+  color: #ffffff !important;
+}
+
+.dark .filter-chip.active {
+  background-color: #6b6bff !important;
+  color: #ffffff !important;
+}
+
+/* Card and Container Styling */
+.dark .card,
+.dark .container,
+.dark .content-area {
+  background-color: #111827 !important;
+}
+
+.dark .card-header,
+.dark .section-header {
+  background-color: #1f2937 !important;
+  border-color: #333 !important;
+}
+
+/* Navigation and Breadcrumb Styling */
+.dark .breadcrumb {
+  background-color: #1f2937 !important;
+}
+
+.dark .pagination {
+  background-color: #111827 !important;
+}
+
+.dark .page-link {
+  background-color: #1f1f1f !important;
+  border-color: #333 !important;
+  color: #ffffff !important;
+}
+
+.dark .page-link:hover {
+  background-color: #2a2a2a !important;
+}
+
+/* Enhanced Theme-aware classes */
+.bg-theme-primary {
+  background-color: var(--bg-primary);
+}
+
+.bg-theme-secondary {
+  background-color: var(--bg-secondary);
+}
+
+.bg-theme-tertiary {
+  background-color: var(--bg-tertiary);
+}
+
+.bg-theme-surface {
+  background-color: var(--bg-surface);
+}
+
+.bg-theme-card {
+  background-color: var(--bg-card);
+}
+
+.bg-theme-modal {
+  background-color: var(--bg-modal);
+}
+
+.text-theme-primary {
+  color: var(--text-primary);
+}
+
+.text-theme-secondary {
+  color: var(--text-secondary);
+}
+
+.text-theme-tertiary {
+  color: var(--text-tertiary);
+}
+
+.text-theme-muted {
+  color: var(--text-muted);
+}
+
+.border-theme {
+  border-color: var(--border-color);
+}
+
+.border-theme-light {
+  border-color: var(--border-light);
+}
+
+.border-theme-focus {
+  border-color: var(--border-focus);
+}
+
+/* Comprehensive Form Control Styling */
+.form-input,
+.form-textarea,
+.form-select {
+  background-color: var(--input-bg);
+  border-color: var(--input-border);
+  color: var(--text-primary);
+  transition: all 0.2s ease;
+}
+
+.form-input:focus,
+.form-textarea:focus,
+.form-select:focus {
+  border-color: var(--input-focus);
+  ring-color: var(--input-focus);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--input-focus-rgb, 59, 130, 246), 0.1);
+}
+
+.form-input::placeholder,
+.form-textarea::placeholder {
+  color: var(--text-placeholder);
+}
+
+.form-input:disabled,
+.form-textarea:disabled,
+.form-select:disabled {
+  background-color: var(--bg-tertiary);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+/* Button Styling */
+.btn-primary {
+  background-color: var(--button-primary);
+  color: white;
+  border: none;
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--button-primary), black 10%);
+}
+
+.btn-secondary {
+  background-color: var(--button-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--bg-tertiary);
+}
+
+.btn-danger {
+  background-color: var(--button-danger);
+  color: white;
+  border: none;
+  transition: all 0.2s ease;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--button-danger), black 10%);
+}
+
+/* Modal Styling */
+.modal-backdrop {
+  background-color: var(--bg-overlay);
+}
+
+.modal-content {
+  background-color: var(--bg-modal);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+
+/* Status Badge Styling */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.status-active {
+  background-color: color-mix(in srgb, var(--status-success), transparent 85%);
+  color: var(--status-success);
+}
+
+.status-inactive {
+  background-color: color-mix(in srgb, var(--text-muted), transparent 85%);
+  color: var(--text-muted);
+}
+
+.status-pending {
+  background-color: color-mix(in srgb, var(--status-warning), transparent 85%);
+  color: var(--status-warning);
+}
+
+.status-approved {
+  background-color: color-mix(in srgb, var(--status-success), transparent 85%);
+  color: var(--status-success);
+}
+
+.status-rejected {
+  background-color: color-mix(in srgb, var(--status-error), transparent 85%);
+  color: var(--status-error);
+}
+
+.status-premium {
+  background-color: color-mix(in srgb, var(--accent-yellow), transparent 85%);
+  color: var(--accent-yellow);
+}
+
+/* Enhanced Dropdown Styling */
+.dropdown-content {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.dropdown-item {
+  color: var(--text-primary);
+  transition: background-color 0.2s ease;
+}
+
+.dropdown-item:hover {
+  background-color: var(--bg-tertiary);
+}
+
+/* Card Styling */
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+}
+
+.card-header {
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* Table Styling */
+.table-header {
+  background-color: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.table-row {
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border-light);
+  transition: background-color 0.2s ease;
+}
+
+.table-row:hover {
+  background-color: var(--bg-secondary);
+}
+
+/* Enhanced category grid styles */
+.categories-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+  overflow: visible;
+  overscroll-behavior: contain;
+}
+
+.category-card {
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  min-height: 200px;
+}
+
+/* Professional Z-Index System - 8px Grid Scale */
+:root {
+  --z-dropdown: 40;
+  --z-header: 50;
+  --z-modal-backdrop: 50;
+  --z-modal: 51;
+  --z-user-menu: 60;
+  --z-toast: 70;
+}
+
+/* Header z-index and overflow management */
+header {
+  z-index: var(--z-header);
+  overflow: visible;
+}
+
+/* UserMenu dropdown z-index */
+.user-menu-dropdown {
+  z-index: var(--z-user-menu) !important;
+}
+
+/* Banner and promotional content */
+.banner,
+.premium-banner {
+  z-index: var(--z-dropdown);
+}
+
+/* 8px Grid System Classes */
+.space-xs { padding: 4px; }
+.space-sm { padding: 8px; }
+.space-md { padding: 16px; }
+.space-lg { padding: 24px; }
+.space-xl { padding: 32px; }
+
+.gap-xs { gap: 4px; }
+.gap-sm { gap: 8px; }
+.gap-md { gap: 16px; }
+.gap-lg { gap: 24px; }
+.gap-xl { gap: 32px; }
+
+/* Hide scrollbars for clean mobile experience */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+img {
+  object-position: top;
+}
+
+/* Badge Size Reduction - 18-20% smaller as approved */
+/* Premium and Mobile badges within wallpaper cards only */
+.wallpaper-card [class*="premium"],
+.wallpaper-card [class*="mobile"],
+.wallpaper-card .status-badge,
+.wallpaper-card [data-badge] {
+  font-size: 9px !important;
+  height: 15px !important;
+  padding: 2px 6px !important;
+  min-width: auto !important;
+  line-height: 1.2 !important;
+}
+
+/* Scale icons within badges proportionally */
+.wallpaper-card [class*="premium"] svg,
+.wallpaper-card [class*="mobile"] svg,
+.wallpaper-card .status-badge svg {
+  transform: scale(0.8) !important;
+  width: 12px !important;
+  height: 12px !important;
+}
+
+/* Specific targeting for Tailwind gradient classes */
+.wallpaper-card [class*="from-yellow"],
+.wallpaper-card [class*="from-blue"],
+.wallpaper-card [class*="from-purple"] {
+  font-size: 9px !important;
+  height: 15px !important;
+  padding: 2px 6px !important;
+}
+
+/* Ensure badges maintain pill shape */
+.wallpaper-card [class*="premium"],
+.wallpaper-card [class*="mobile"],
+.wallpaper-card .status-badge,
+.wallpaper-card [data-badge],
+.wallpaper-card [class*="from-yellow"],
+.wallpaper-card [class*="from-blue"],
+.wallpaper-card [class*="from-purple"] {
+  border-radius: 9999px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* Button Size Reduction - 15-20% smaller for Download and Favorite buttons */
+/* Download Button (green circle) - estimated 44px -> 35px */
+.wallpaper-card [data-action="download"],
+.wallpaper-card [aria-label*="download"],
+.wallpaper-card [title*="download"],
+.wallpaper-card .download-button,
+.wallpaper-card .button-download,
+.wallpaper-card button[class*="download"],
+.wallpaper-card button[aria-label*="download"],
+.wallpaper-card [class*="download-button"],
+.wallpaper-card [class*="download-btn"] {
+  width: 35px !important;
+  height: 35px !important;
+  min-width: 35px !important;
+  min-height: 35px !important;
+  border-radius: 50% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+}
+
+/* Favorite Button (heart icon) - estimated 44px -> 35px */
+.wallpaper-card [data-action="favorite"],
+.wallpaper-card [aria-label*="favorite"],
+.wallpaper-card [title*="favorite"],
+.wallpaper-card .favorite-button,
+.wallpaper-card .button-favorite,
+.wallpaper-card button[class*="favorite"],
+.wallpaper-card button[aria-label*="favorite"],
+.wallpaper-card [class*="favorite-button"],
+.wallpaper-card [class*="favorite-btn"],
+.wallpaper-card [class*="heart-button"],
+.wallpaper-card [class*="like-button"],
+.wallpaper-card [data-action="like"],
+.wallpaper-card [data-action="heart"],
+.wallpaper-card [aria-label*="like"],
+.wallpaper-card [aria-label*="heart"] {
+  width: 35px !important;
+  height: 35px !important;
+  min-width: 35px !important;
+  min-height: 35px !important;
+  border-radius: 50% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+}
+
+/* Scale SVG icons within buttons proportionally */
+.wallpaper-card [data-action="download"] svg,
+.wallpaper-card [data-action="favorite"] svg,
+.wallpaper-card [aria-label*="download"] svg,
+.wallpaper-card [aria-label*="favorite"] svg,
+.wallpaper-card .download-button svg,
+.wallpaper-card .favorite-button svg,
+.wallpaper-card .button-download svg,
+.wallpaper-card .button-favorite svg,
+.wallpaper-card button[class*="download"] svg,
+.wallpaper-card button[class*="favorite"] svg {
+  transform: scale(0.8) !important;
+  width: 14px !important;
+  height: 14px !important;
+}
+
+/* Additional targeting for common wallpaper card button patterns */
+.wallpaper-card .wallpaper-actions button,
+.wallpaper-card .card-actions button,
+.wallpaper-card .action-buttons button,
+.wallpaper-card [role="button"]:not([class*="badge"]) {
+  /* Base button styling - will be overridden by more specific selectors above */
+}
+
+/* Ensure button positioning and spacing remains unchanged */
+.wallpaper-card [data-action="download"],
+.wallpaper-card [data-action="favorite"],
+.wallpaper-card [aria-label*="download"],
+.wallpaper-card [aria-label*="favorite"],
+.wallpaper-card .download-button,
+.wallpaper-card .favorite-button,
+.wallpaper-card .button-download,
+.wallpaper-card .button-favorite,
+.wallpaper-card button[class*="download"],
+.wallpaper-card button[class*="favorite"] {
+  /* Preserve existing positioning */
+  margin: 0 !important;
+  position: relative !important;
+  z-index: auto !important;
+  float: none !important;
+  clear: none !important;
+}
+
+/* Responsive considerations - ensure smaller buttons work on mobile */
+@media (max-width: 768px) {
+  .wallpaper-card [data-action="download"],
+  .wallpaper-card [data-action="favorite"],
+  .wallpaper-card .download-button,
+  .wallpaper-card .favorite-button {
+    width: 35px !important;
+    height: 35px !important;
+    min-width: 35px !important;
+    min-height: 35px !important;
+  }
+}
+
+.fixed {
+  position: fixed;
+}

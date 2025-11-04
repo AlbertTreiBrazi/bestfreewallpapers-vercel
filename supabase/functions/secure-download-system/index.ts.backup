@@ -1,0 +1,301 @@
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const requestData = await req.json();
+    const { wallpaper_id, resolution = '1080p', user_type = 'guest' } = requestData;
+
+    if (!wallpaper_id) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Wallpaper ID is required'
+        }
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+
+    if (!serviceRoleKey || !supabaseUrl || !supabaseAnonKey) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const supabaseHeaders = {
+      'Authorization': `Bearer ${serviceRoleKey}`,
+      'apikey': serviceRoleKey,
+      'Content-Type': 'application/json'
+    };
+
+    // Get user information if authenticated
+    let userId = null;
+    let isPremiumUser = false;
+    let isAdminUser = false;
+    
+    const authHeader = req.headers.get('authorization');
+    if (authHeader) {
+      try {
+        const token = authHeader.replace('Bearer ', '');
+        const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'apikey': supabaseAnonKey
+          }
+        });
+
+        if (userResponse.ok) {
+          const userData = await userResponse.json();
+          userId = userData.id;
+
+          // Get user profile
+          const profileResponse = await fetch(
+            `${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=plan_type,premium_expires_at,is_admin`,
+            { headers: supabaseHeaders }
+          );
+
+          if (profileResponse.ok) {
+            const profiles = await profileResponse.json();
+            const profile = profiles[0];
+            
+            isPremiumUser = profile?.plan_type === 'premium' && 
+                           (!profile?.premium_expires_at || new Date(profile.premium_expires_at) > new Date());
+            isAdminUser = profile?.is_admin === true;
+          }
+        }
+      } catch (error) {
+        // Continue as guest if auth fails
+        console.log('Auth verification failed, continuing as guest');
+      }
+    }
+
+    // Get wallpaper data
+    const wallpaperResponse = await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaper_id}&select=id,title,slug,is_premium,is_published,is_active,download_count,image_url,download_url,resolution_4k,resolution_8k,categories(slug)`,
+      { headers: supabaseHeaders }
+    );
+
+    if (!wallpaperResponse.ok) {
+      throw new Error('Wallpaper not found');
+    }
+
+    const wallpapers = await wallpaperResponse.json();
+    if (wallpapers.length === 0) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'WALLPAPER_NOT_FOUND',
+          message: 'Wallpaper not found'
+        }
+      }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const wallpaper = wallpapers[0];
+
+    // Check if wallpaper is available
+    if (!wallpaper.is_published || !wallpaper.is_active) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'WALLPAPER_UNAVAILABLE',
+          message: 'Wallpaper is not available'
+        }
+      }), {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check premium access - Allow guest/free users to proceed with ads for premium wallpapers
+    // Only block if specifically requesting premium resolutions without premium access
+    if (wallpaper.is_premium && !isPremiumUser && !isAdminUser && (resolution === '4k' || resolution === '8k')) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'PREMIUM_REQUIRED',
+          message: `Premium subscription required for ${resolution.toUpperCase()} downloads of premium wallpapers`
+        }
+      }), {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check resolution access
+    if ((resolution === '4k' || resolution === '8k') && !isPremiumUser && !isAdminUser) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'PREMIUM_REQUIRED',
+          message: `Premium subscription required for ${resolution.toUpperCase()} downloads`
+        }
+      }), {
+        status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check rate limiting for premium users only (daily limit of 3 for premium users)
+    if (isPremiumUser && !isAdminUser && userId) {
+      const now = new Date();
+      const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+      const downloadsResponse = await fetch(
+        `${supabaseUrl}/rest/v1/downloads?user_id=eq.${userId}&created_at=gte.${oneDayAgo.toISOString()}&select=id`,
+        { headers: supabaseHeaders }
+      );
+
+      if (downloadsResponse.ok) {
+        const recentDownloads = await downloadsResponse.json();
+        const dailyLimit = 3; // Premium users: 3 downloads per day
+        
+        if (recentDownloads.length >= dailyLimit) {
+          return new Response(JSON.stringify({
+            error: {
+              code: 'DOWNLOAD_LIMIT_REACHED',
+              message: `Daily download limit reached. Premium users can download ${dailyLimit} wallpapers per day.`,
+              remaining: 0,
+              reset_time: new Date(now.getTime() + (24 * 60 * 60 * 1000) - (now.getTime() % (24 * 60 * 60 * 1000))).toISOString()
+            }
+          }), {
+            status: 429,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+        
+        // Include remaining downloads for premium users
+        responseData.remaining_downloads = dailyLimit - recentDownloads.length;
+      }
+    }
+
+    // For guest users (no authentication), apply IP-based rate limiting
+    if (!userId) {
+      const clientIp = req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for') || 'unknown';
+      
+      if (clientIp !== 'unknown') {
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+        const guestDownloadsResponse = await fetch(
+          `${supabaseUrl}/rest/v1/downloads?ip_address=eq.${clientIp}&created_at=gte.${oneHourAgo.toISOString()}&select=id`,
+          { headers: supabaseHeaders }
+        );
+
+        if (guestDownloadsResponse.ok) {
+          const recentGuestDownloads = await guestDownloadsResponse.json();
+          const guestHourlyLimit = 3; // Guest users: 3 downloads per hour
+          
+          if (recentGuestDownloads.length >= guestHourlyLimit) {
+            return new Response(JSON.stringify({
+              error: {
+                code: 'DOWNLOAD_LIMIT_REACHED',
+                message: `Download limit reached. Please wait before downloading more wallpapers or create an account for higher limits.`
+              }
+            }), {
+              status: 429,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+        }
+      }
+    }
+
+    // Generate download token and URL
+    const downloadToken = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 3600 * 1000); // 1 hour
+
+    // Determine the actual download URL based on resolution
+    let actualDownloadUrl = wallpaper.download_url || wallpaper.image_url;
+    if (resolution === '4k' && wallpaper.resolution_4k) {
+      actualDownloadUrl = wallpaper.resolution_4k;
+    } else if (resolution === '8k' && wallpaper.resolution_8k) {
+      actualDownloadUrl = wallpaper.resolution_8k;
+    }
+
+    // Store download session
+    const downloadSession = {
+      token: downloadToken,
+      wallpaper_id: wallpaper.id,
+      user_id: userId,
+      resolution: resolution,
+      download_url: actualDownloadUrl,
+      expires_at: expiresAt.toISOString(),
+      is_premium_user: isPremiumUser,
+      ip_address: req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for') || 'unknown',
+      user_agent: req.headers.get('user-agent') || 'unknown',
+      created_at: new Date().toISOString()
+    };
+
+    const sessionResponse = await fetch(
+      `${supabaseUrl}/rest/v1/download_sessions`,
+      {
+        method: 'POST',
+        headers: {
+          ...supabaseHeaders,
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify(downloadSession)
+      }
+    );
+
+    if (!sessionResponse.ok) {
+      throw new Error('Failed to create download session');
+    }
+
+    // Determine response based on user type
+    const responseData: any = {
+      download_token: downloadToken,
+      wallpaper_id: wallpaper.id,
+      wallpaper_title: wallpaper.title,
+      resolution: resolution,
+      expires_at: expiresAt.toISOString(),
+      user_type: isPremiumUser ? 'premium' : (userId ? 'free' : 'guest')
+    };
+
+    if (isPremiumUser || isAdminUser) {
+      // Premium users get instant download
+      responseData.instant_download = true;
+      responseData.download_url = `${supabaseUrl}/functions/v1/download-file?token=${downloadToken}`;
+    } else {
+      // Free and guest users need to go through ad screen
+      responseData.instant_download = false;
+      responseData.ad_required = true;
+      responseData.countdown_duration = userId ? 5 : 10; // Longer countdown for guests
+      responseData.download_url = `${supabaseUrl}/functions/v1/download-file?token=${downloadToken}`;
+    }
+    
+    // Add download tracking information
+    responseData.tracks_download = true;
+
+    return new Response(JSON.stringify({ data: responseData }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error: any) {
+    console.error('Secure download system error:', error);
+
+    const errorResponse = {
+      error: {
+        code: 'DOWNLOAD_SYSTEM_ERROR',
+        message: error.message || 'Internal server error'
+      }
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});

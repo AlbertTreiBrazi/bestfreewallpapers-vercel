@@ -1,0 +1,282 @@
+// Generate a simple SVG placeholder for failed images
+function generatePlaceholderResponse(title: string, corsHeaders: Record<string, string>) {
+    const svgContent = `
+        <svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#f3f4f6"/>
+            <g fill="#9ca3af" text-anchor="middle" font-family="Arial, sans-serif">
+                <text x="50%" y="40%" font-size="48" opacity="0.3">📷</text>
+                <text x="50%" y="60%" font-size="14" opacity="0.7">Image not available</text>
+                <text x="50%" y="75%" font-size="12" opacity="0.5">${title.substring(0, 30)}...</text>
+            </g>
+        </svg>
+    `.trim();
+    
+    return new Response(svgContent, {
+        status: 200,
+        headers: {
+            ...corsHeaders,
+            'Content-Type': 'image/svg+xml',
+            'Cache-Control': 'public, max-age=300, stale-while-revalidate=86400'
+        }
+    });
+}
+
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const url = new URL(req.url);
+        const pathParts = url.pathname.split('/');
+        const wallpaperId = pathParts[pathParts.length - 1];
+
+        // Parse query parameters
+        const width = url.searchParams.get('w') || url.searchParams.get('width');
+        const height = url.searchParams.get('h') || url.searchParams.get('height');
+        const quality = url.searchParams.get('q') || url.searchParams.get('quality') || '80';
+        const format = url.searchParams.get('f') || url.searchParams.get('format') || 'auto';
+        const type = url.searchParams.get('type') || 'preview'; // preview, thumbnail, or original
+        
+        // Signed URL parameters for downloads
+        const resolution = url.searchParams.get('resolution');
+        const expires = url.searchParams.get('expires');
+        const signature = url.searchParams.get('signature');
+        const userId = url.searchParams.get('user');
+
+        if (!wallpaperId || isNaN(Number(wallpaperId))) {
+            throw new Error('Invalid wallpaper ID');
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // If this is a signed download request (type=original), validate the signature
+        if (type === 'original' && (expires || signature || userId)) {
+            if (!expires || !signature || !userId || !resolution) {
+                throw new Error('Invalid signed URL parameters');
+            }
+
+            // Check if the URL has expired
+            const expiresAt = parseInt(expires);
+            const currentTime = Math.floor(Date.now() / 1000);
+            
+            if (currentTime > expiresAt) {
+                throw new Error('Download URL has expired');
+            }
+
+            // Verify the signature
+            const signatureData = `${wallpaperId}-${resolution}-${userId}-${expiresAt}`;
+            const expectedSignature = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signatureData + serviceRoleKey));
+            const expectedSignatureHex = Array.from(new Uint8Array(expectedSignature)).map(b => b.toString(16).padStart(2, '0')).join('');
+            
+            if (signature !== expectedSignatureHex.substring(0, 16)) {
+                throw new Error('Invalid signature');
+            }
+
+            // Verify user has access (get their profile to check premium status)
+            const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=plan_type,premium_expires_at`, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Accept': 'application/json'
+                }
+            });
+
+            if (profileResponse.ok) {
+                const profiles = await profileResponse.json();
+                const profile = profiles[0];
+                
+                if (profile) {
+                    const isPremiumUser = profile.plan_type === 'premium' && 
+                                         (!profile.premium_expires_at || new Date(profile.premium_expires_at) > new Date());
+                    
+                    // Check if user needs premium access for this resolution
+                    if ((resolution === '4k' || resolution === '8k') && !isPremiumUser) {
+                        throw new Error(`Premium subscription required for ${resolution.toUpperCase()} downloads`);
+                    }
+                }
+            }
+        }
+
+        // Get wallpaper data from database
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=*`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpaper = wallpapers[0];
+        let imageUrl;
+
+        // Determine which image URL to use based on type and resolution
+        switch (type) {
+            case 'thumbnail':
+                imageUrl = wallpaper.thumbnail_url || wallpaper.image_url;
+                break;
+            case 'original':
+                // For original/download requests, use resolution-specific URLs
+                if (resolution === '4k') {
+                    imageUrl = wallpaper.resolution_4k || wallpaper.download_url || wallpaper.image_url;
+                } else if (resolution === '8k') {
+                    imageUrl = wallpaper.resolution_8k || wallpaper.resolution_4k || wallpaper.download_url || wallpaper.image_url;
+                } else {
+                    // Default to 1080p or fallback
+                    imageUrl = wallpaper.resolution_1080p || wallpaper.download_url || wallpaper.image_url;
+                }
+                break;
+            case 'preview':
+            default:
+                imageUrl = wallpaper.image_url;
+                break;
+        }
+
+        if (!imageUrl) {
+            throw new Error('Image URL not found');
+        }
+
+        // If the image is already hosted on Supabase storage, we can optimize it
+        if (imageUrl.includes(supabaseUrl.replace('https://', ''))) {
+            // This is a Supabase storage URL, we can apply transformations
+            const storageUrl = new URL(imageUrl);
+            
+            // Add transformation parameters for non-original requests
+            if (type !== 'original') {
+                if (width) storageUrl.searchParams.set('width', width);
+                if (height) storageUrl.searchParams.set('height', height);
+                if (quality && quality !== '80') storageUrl.searchParams.set('quality', quality);
+                if (format && format !== 'auto') storageUrl.searchParams.set('format', format);
+            }
+            
+            imageUrl = storageUrl.toString();
+        }
+
+        // Fetch the image with proper error handling and retries
+        let imageResponse;
+        let attempts = 0;
+        const maxAttempts = 2; // Reduced attempts for better performance
+        
+        while (attempts < maxAttempts) {
+            try {
+                imageResponse = await fetch(imageUrl, {
+                    headers: {
+                        'User-Agent': 'Supabase-Edge-Function/1.0',
+                        'Accept': 'image/*,*/*',
+                        'Cache-Control': 'no-cache'
+                    },
+                    signal: AbortSignal.timeout(10000) // 10 second timeout
+                });
+                
+                if (imageResponse.ok) {
+                    break;
+                }
+                
+                if (imageResponse.status === 404 && attempts === 0) {
+                    // Try fallback placeholder on first 404
+                    console.log('Image not found, trying placeholder');
+                    attempts++;
+                    continue;
+                }
+                
+                attempts++;
+                if (attempts >= maxAttempts) {
+                    // Return placeholder instead of throwing error
+                    return generatePlaceholderResponse(wallpaper.title, corsHeaders);
+                }
+                
+                // Quick retry
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (fetchError) {
+                attempts++;
+                if (attempts >= maxAttempts) {
+                    console.error(`Failed to fetch image from ${imageUrl}: ${fetchError}`);
+                    // Return placeholder instead of throwing error
+                    return generatePlaceholderResponse(wallpaper.title, corsHeaders);
+                }
+                
+                // Quick retry
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+
+        // If we still don't have a successful response, return placeholder
+        if (!imageResponse || !imageResponse.ok) {
+            return generatePlaceholderResponse(wallpaper.title, corsHeaders);
+        }
+
+        // Get the image data
+        const imageData = await imageResponse.arrayBuffer();
+        const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+
+        // Set appropriate headers based on request type
+        const headers = {
+            ...corsHeaders,
+            'Content-Type': contentType,
+            'Content-Length': imageData.byteLength.toString(),
+        };
+
+        // For original/download requests, set download headers
+        if (type === 'original') {
+            headers['Content-Disposition'] = `attachment; filename="${wallpaper.title.replace(/[^a-zA-Z0-9]/g, '_')}_${resolution || '1080p'}.${contentType.split('/')[1] || 'jpg'}"`;
+            headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+        } else {
+            // For preview/thumbnail requests, set caching headers
+            headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+            headers['ETag'] = `"${wallpaperId}-${type}-${width || 'auto'}-${height || 'auto'}-${quality}"`;
+        }
+
+        return new Response(imageData, {
+            status: 200,
+            headers
+        });
+
+    } catch (error) {
+        console.error('Image serving error:', error);
+
+        // For signed URL errors, return appropriate HTTP status
+        let status = 404;
+        if (error.message.includes('expired')) {
+            status = 410; // Gone
+        } else if (error.message.includes('Invalid signature') || error.message.includes('Premium subscription required')) {
+            status = 403; // Forbidden
+        } else if (error.message.includes('Invalid signed URL')) {
+            status = 400; // Bad Request
+        }
+
+        const errorResponse = {
+            error: {
+                code: 'IMAGE_SERVING_FAILED',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

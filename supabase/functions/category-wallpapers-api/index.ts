@@ -1,0 +1,199 @@
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const url = new URL(req.url);
+    const categorySlug = url.searchParams.get('category');
+    const page = parseInt(url.searchParams.get('page') || '1');
+    const limit = parseInt(url.searchParams.get('limit') || '12');
+    const sort = url.searchParams.get('sort') || 'newest';
+    const search = url.searchParams.get('search') || '';
+    
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    // Calculate offset for pagination
+    const offset = (page - 1) * limit;
+
+    // First, get the category ID if category slug is provided
+    let categoryId = null;
+    if (categorySlug && categorySlug !== 'all') {
+      const categoryResponse = await fetch(
+        `${supabaseUrl}/rest/v1/categories?select=id,name&slug=eq.${categorySlug}&is_active=eq.true`,
+        {
+          headers: {
+            'Authorization': `Bearer ${serviceRoleKey}`,
+            'apikey': serviceRoleKey
+          }
+        }
+      );
+      
+      if (categoryResponse.ok) {
+        const categories = await categoryResponse.json();
+        if (categories.length > 0) {
+          categoryId = categories[0].id;
+        }
+      }
+    }
+
+    // Build the query for wallpapers
+    let wallpapersQuery = [
+      'select=id,title,slug,description,image_url,thumbnail_url,download_url,width,height,download_count,is_featured,created_at,category_id,live_video_url,live_poster_url,live_enabled,categories!inner(id,name,slug)',
+      'is_published=eq.true',
+      'is_active=eq.true',
+      'visibility=eq.public'
+    ];
+
+    // Add category filter using the junction table
+    if (categoryId) {
+      // Use EXISTS subquery to check wallpapers_categories junction table
+      wallpapersQuery.push(`id=in.(${await getWallpaperIdsByCategory(supabaseUrl, serviceRoleKey, categoryId)})`);
+    }
+
+    // Add search filter
+    if (search && search.trim()) {
+      const sanitizedSearch = encodeURIComponent(search.trim());
+      wallpapersQuery.push(`or=(title.ilike.*${sanitizedSearch}*,description.ilike.*${sanitizedSearch}*)`);
+    }
+
+    // Add sorting
+    switch (sort) {
+      case 'newest':
+        wallpapersQuery.push('order=created_at.desc');
+        break;
+      case 'oldest':
+        wallpapersQuery.push('order=created_at.asc');
+        break;
+      case 'popular':
+        wallpapersQuery.push('order=download_count.desc,created_at.desc');
+        break;
+      case 'title':
+        wallpapersQuery.push('order=title.asc');
+        break;
+      default:
+        wallpapersQuery.push('order=created_at.desc');
+    }
+
+    // Add pagination
+    wallpapersQuery.push(`limit=${limit}`);
+    wallpapersQuery.push(`offset=${offset}`);
+
+    const queryString = wallpapersQuery.join('&');
+    
+    // Fetch wallpapers
+    const wallpapersResponse = await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?${queryString}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey
+        }
+      }
+    );
+
+    if (!wallpapersResponse.ok) {
+      const errorText = await wallpapersResponse.text();
+      throw new Error(`Failed to fetch wallpapers: ${errorText}`);
+    }
+
+    const wallpapers = await wallpapersResponse.json();
+
+    // Get total count for pagination
+    let countQuery = [
+      'select=id',
+      'is_published=eq.true',
+      'is_active=eq.true',
+      'visibility=eq.public'
+    ];
+
+    if (categoryId) {
+      countQuery.push(`id=in.(${await getWallpaperIdsByCategory(supabaseUrl, serviceRoleKey, categoryId)})`);
+    }
+
+    if (search && search.trim()) {
+      const sanitizedSearch = encodeURIComponent(search.trim());
+      countQuery.push(`or=(title.ilike.*${sanitizedSearch}*,description.ilike.*${sanitizedSearch}*)`);
+    }
+
+    const countResponse = await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?${countQuery.join('&')}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey,
+          'Prefer': 'count=exact'
+        }
+      }
+    );
+
+    const totalCount = parseInt(countResponse.headers.get('content-range')?.split('/')[1] || '0');
+    const totalPages = Math.ceil(totalCount / limit);
+
+    // Return structured response
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        wallpapers: wallpapers || [],
+        pagination: {
+          page,
+          limit,
+          totalCount,
+          totalPages,
+          hasNext: page < totalPages,
+          hasPrev: page > 1
+        },
+        category: categoryId ? { id: categoryId, slug: categorySlug } : null
+      }
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error: any) {
+    console.error('Category wallpapers API error:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: {
+        message: error.message || 'Internal server error',
+        code: 'API_ERROR'
+      }
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Helper function to get wallpaper IDs by category using junction table
+async function getWallpaperIdsByCategory(supabaseUrl: string, serviceRoleKey: string, categoryId: number): Promise<string> {
+  const junctionResponse = await fetch(
+    `${supabaseUrl}/rest/v1/wallpapers_categories?select=wallpaper_id&category_id=eq.${categoryId}`,
+    {
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey
+      }
+    }
+  );
+  
+  if (junctionResponse.ok) {
+    const junctionData = await junctionResponse.json();
+    const wallpaperIds = junctionData.map((item: any) => item.wallpaper_id);
+    return wallpaperIds.length > 0 ? wallpaperIds.join(',') : '0'; // Return '0' if no wallpapers found
+  }
+  
+  return '0'; // Return '0' if query failed
+}

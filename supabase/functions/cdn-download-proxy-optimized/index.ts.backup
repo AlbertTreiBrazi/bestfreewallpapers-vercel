@@ -1,0 +1,321 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const url = new URL(req.url);
+        const pathParts = url.pathname.split('/');
+        const filename = pathParts[pathParts.length - 1];
+        
+        // Parse filename: wallpaper-{id}-{resolution}.{ext}
+        const filenameMatch = filename.match(/^wallpaper-(\d+)(?:-(1080p|4k|8k))?\.([a-zA-Z0-9]+)$/);
+        
+        if (!filenameMatch) {
+            throw new Error('Invalid download URL format');
+        }
+
+        const wallpaperId = parseInt(filenameMatch[1]);
+        const resolution = filenameMatch[2] || '1080p';
+        const extension = filenameMatch[3];
+
+        if (!wallpaperId || isNaN(wallpaperId)) {
+            throw new Error('Invalid wallpaper ID');
+        }
+
+        // Get auth from query parameter (for CDN caching we can't use headers)
+        const authToken = url.searchParams.get('auth');
+        if (!authToken) {
+            throw new Error('Authentication token required');
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+
+        if (!serviceRoleKey || !supabaseUrl || !supabaseAnonKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Verify auth token
+        const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'apikey': supabaseAnonKey
+            }
+        });
+
+        if (!userResponse.ok) {
+            throw new Error('Invalid authentication token');
+        }
+
+        const userData = await userResponse.json();
+        const userId = userData.id;
+
+        // Get user profile for premium check
+        const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=plan_type,premium_expires_at`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!profileResponse.ok) {
+            throw new Error('Failed to fetch user profile');
+        }
+
+        const profiles = await profileResponse.json();
+        const profile = profiles[0];
+        
+        const isPremiumUser = profile?.plan_type === 'premium' && 
+                             (!profile?.premium_expires_at || new Date(profile.premium_expires_at) > new Date());
+
+        // Get wallpaper data with category info for organized paths
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=id,title,is_premium,download_url,resolution_1080p,resolution_4k,resolution_8k,download_count,original_file_path,category_id,categories(slug)`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpaper = wallpapers[0];
+
+        // Check access permissions
+        if (wallpaper.is_premium && !isPremiumUser) {
+            throw new Error('Premium subscription required for this wallpaper');
+        }
+
+        if ((resolution === '4k' || resolution === '8k') && !isPremiumUser) {
+            throw new Error(`Premium subscription required for ${resolution.toUpperCase()} downloads`);
+        }
+
+        // Rate limiting check for free users
+        if (!isPremiumUser) {
+            const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+            
+            try {
+                const downloadsResponse = await fetch(`${supabaseUrl}/rest/v1/downloads?user_id=eq.${userId}&created_at=gte.${oneHourAgo}&select=id`, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (downloadsResponse.ok) {
+                    const recentDownloads = await downloadsResponse.json();
+                    if (recentDownloads.length >= 10) {
+                        throw new Error('Rate limit exceeded. Free users can download 10 wallpapers per hour.');
+                    }
+                }
+            } catch (rateLimitError) {
+                console.warn('Rate limit check failed:', rateLimitError);
+            }
+        }
+
+        // Determine category path for organized storage
+        const categorySlug = wallpaper.categories?.slug || 'uncategorized';
+        
+        // Generate organized file path based on new bucket structure
+        let filePath;
+        let bucketName;
+        
+        // Use organized paths: original/{category}/{wallpaper-id}.jpg
+        if (wallpaper.original_file_path && wallpaper.original_file_path.includes('/')) {
+            // New organized structure
+            filePath = wallpaper.original_file_path;
+            bucketName = 'wallpapers-original';
+        } else {
+            // Fallback to organized path construction
+            filePath = `original/${categorySlug}/${wallpaperId}.jpg`;
+            bucketName = 'wallpapers-original';
+        }
+
+        console.log(`Fetching from bucket: ${bucketName}, path: ${filePath}`);
+
+        // Generate signed URL using Supabase Storage API
+        const signedUrlResponse = await fetch(`${supabaseUrl}/storage/v1/object/sign/${bucketName}/${filePath}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                expiresIn: 3600 // 1 hour for CDN caching
+            })
+        });
+
+        if (!signedUrlResponse.ok) {
+            // Fallback to legacy download URLs if new storage structure isn't ready
+            console.log('Signed URL failed, trying legacy download URLs');
+            let downloadUrl;
+            
+            switch (resolution) {
+                case '4k':
+                    downloadUrl = wallpaper.resolution_4k || wallpaper.download_url;
+                    break;
+                case '8k':
+                    downloadUrl = wallpaper.resolution_8k || wallpaper.resolution_4k || wallpaper.download_url;
+                    break;
+                case '1080p':
+                default:
+                    downloadUrl = wallpaper.resolution_1080p || wallpaper.download_url;
+                    break;
+            }
+
+            if (!downloadUrl) {
+                throw new Error('Download URL not available for this resolution');
+            }
+
+            // Fetch from legacy URL
+            const fileResponse = await fetch(downloadUrl, {
+                headers: {
+                    'Accept': 'image/*,*/*',
+                    'User-Agent': 'Wallpaper-CDN-Proxy/2.0'
+                }
+            });
+
+            if (!fileResponse.ok) {
+                throw new Error(`Failed to fetch wallpaper file: ${fileResponse.status}`);
+            }
+
+            const fileData = await fileResponse.arrayBuffer();
+            const contentType = fileResponse.headers.get('content-type') || 'image/jpeg';
+            
+            return createDownloadResponse(fileData, contentType, wallpaper, resolution, userId, supabaseUrl, serviceRoleKey, corsHeaders);
+        }
+
+        const signedData = await signedUrlResponse.json();
+        const finalDownloadUrl = `${supabaseUrl}${signedData.signedURL}`;
+
+        // Fetch the actual file from signed URL
+        const fileResponse = await fetch(finalDownloadUrl, {
+            headers: {
+                'Accept': 'image/*,*/*',
+                'User-Agent': 'Wallpaper-CDN-Proxy/2.0'
+            }
+        });
+
+        if (!fileResponse.ok) {
+            throw new Error(`Failed to fetch wallpaper file: ${fileResponse.status}`);
+        }
+
+        // Get file content and metadata
+        const fileData = await fileResponse.arrayBuffer();
+        const contentType = fileResponse.headers.get('content-type') || 'image/jpeg';
+        
+        return createDownloadResponse(fileData, contentType, wallpaper, resolution, userId, supabaseUrl, serviceRoleKey, corsHeaders);
+
+    } catch (error) {
+        console.error('CDN download proxy error:', error);
+
+        // Return appropriate HTTP status codes for CDN compatibility
+        let status = 404;
+        if (error.message.includes('Authentication') || error.message.includes('Premium subscription')) {
+            status = 403;
+        } else if (error.message.includes('Rate limit')) {
+            status = 429;
+        } else if (error.message.includes('Invalid')) {
+            status = 400;
+        }
+
+        const errorResponse = {
+            error: {
+                code: 'CDN_DOWNLOAD_FAILED',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});
+
+// Helper function to create download response with proper headers and tracking
+async function createDownloadResponse(
+    fileData: ArrayBuffer, 
+    contentType: string, 
+    wallpaper: any, 
+    resolution: string, 
+    userId: string, 
+    supabaseUrl: string, 
+    serviceRoleKey: string, 
+    corsHeaders: any
+) {
+    // Generate clean filename
+    const cleanTitle = wallpaper.title.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
+    const downloadFilename = `${cleanTitle}_${resolution}.jpg`;
+
+    // Record the download (async, don't wait)
+    const downloadRecord = {
+        user_id: userId,
+        wallpaper_id: wallpaper.id,
+        resolution: resolution,
+        ip_address: 'cdn-proxy',
+        user_agent: 'CDN-Optimized-Download'
+    };
+
+    fetch(`${supabaseUrl}/rest/v1/downloads`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${serviceRoleKey}`,
+            'apikey': serviceRoleKey,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(downloadRecord)
+    }).catch(err => console.error('Failed to record download:', err));
+
+    // Update download count (async, don't wait)
+    fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaper.id}`, {
+        method: 'PATCH',
+        headers: {
+            'Authorization': `Bearer ${serviceRoleKey}`,
+            'apikey': serviceRoleKey,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ download_count: (wallpaper.download_count || 0) + 1 })
+    }).catch(err => console.error('Failed to update download count:', err));
+
+    // Return file with CDN-optimized headers
+    const cdnHeaders = {
+        ...corsHeaders,
+        'Content-Type': contentType,
+        'Content-Length': fileData.byteLength.toString(),
+        'Content-Disposition': `attachment; filename="${downloadFilename}"`,
+        // CDN optimization headers - critical for Cloudflare caching
+        'Cache-Control': 'public, max-age=2592000', // 30 days
+        'ETag': `"wallpaper-${wallpaper.id}-${resolution}"`,
+        'Last-Modified': new Date().toUTCString(),
+        // Cloudflare specific headers
+        'CF-Cache-Tag': `wallpaper,wallpaper-${wallpaper.id}`,
+        'Vary': 'Accept-Encoding'
+    };
+
+    return new Response(fileData, {
+        status: 200,
+        headers: cdnHeaders
+    });
+}

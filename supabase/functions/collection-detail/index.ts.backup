@@ -1,0 +1,111 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false',
+        'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=1800'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const url = new URL(req.url);
+        const pathSegments = url.pathname.split('/').filter(Boolean);
+        const slug = pathSegments[pathSegments.length - 1];
+
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+        if (!supabaseUrl || !serviceRoleKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Handle view count increment
+        if (req.method === 'POST') {
+            const body = await req.json().catch(() => ({}));
+            if (body.action === 'increment_view') {
+                try {
+                    await fetch(`${supabaseUrl}/rest/v1/collections?slug=eq.${slug}`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Authorization': `Bearer ${serviceRoleKey}`,
+                            'apikey': serviceRoleKey,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            view_count: 'view_count + 1'
+                        })
+                    });
+                } catch (error) {
+                    console.error('Failed to increment view count:', error);
+                }
+                
+                return new Response(JSON.stringify({ success: true }), {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+            }
+        }
+
+        // Get collection details and wallpapers
+        const sort = url.searchParams.get('sort') || 'newest';
+        const page = parseInt(url.searchParams.get('page') || '1');
+        const limit = parseInt(url.searchParams.get('limit') || '12');
+
+        // Use RPC function for optimized performance
+        const response = await fetch(`${supabaseUrl}/rest/v1/rpc/get_collection_with_wallpapers`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                collection_slug: slug,
+                sort_by: sort,
+                page_number: page,
+                page_limit: limit
+            })
+        });
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                return new Response(JSON.stringify({
+                    error: {
+                        code: 'COLLECTION_NOT_FOUND',
+                        message: 'Collection not found'
+                    }
+                }), {
+                    status: 404,
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                });
+            }
+            throw new Error('Failed to fetch collection details');
+        }
+
+        const result = await response.json();
+
+        return new Response(JSON.stringify({
+            data: result
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Collection detail API error:', error);
+        
+        const errorResponse = {
+            error: {
+                code: 'COLLECTION_DETAIL_ERROR',
+                message: error.message || 'Failed to fetch collection details'
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

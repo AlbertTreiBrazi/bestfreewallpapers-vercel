@@ -1,0 +1,102 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        if (req.method !== 'POST') {
+            throw new Error('Method not allowed');
+        }
+
+        const formData = await req.formData();
+        const file = formData.get('file') as File;
+
+        if (!file) {
+            throw new Error('No file provided');
+        }
+
+        // Validate file type
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+        if (!allowedTypes.includes(file.type)) {
+            throw new Error('Invalid file type. Only JPEG, PNG, GIF, and WebP images are allowed.');
+        }
+
+        // Validate file size (5MB max)
+        const maxSize = 5 * 1024 * 1024; // 5MB
+        if (file.size > maxSize) {
+            throw new Error('File too large. Maximum size is 5MB.');
+        }
+
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+        if (!supabaseUrl || !serviceRoleKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Generate unique filename
+        const timestamp = Date.now();
+        const randomSuffix = Math.random().toString(36).substring(2, 15);
+        const fileExtension = file.name.split('.').pop();
+        const fileName = `logged-in-ad-${timestamp}-${randomSuffix}.${fileExtension}`;
+        const filePath = `logged-in-ads/${fileName}`;
+
+        // Upload to Supabase Storage
+        const uploadResponse = await fetch(
+            `${supabaseUrl}/storage/v1/object/wallpaper-uploads/${filePath}`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'Content-Type': file.type,
+                    'x-upsert': 'true'
+                },
+                body: file
+            }
+        );
+
+        if (!uploadResponse.ok) {
+            const errorText = await uploadResponse.text();
+            console.error('Upload error:', errorText);
+            throw new Error('Failed to upload image');
+        }
+
+        // Get public URL
+        const publicUrl = `${supabaseUrl}/storage/v1/object/public/wallpaper-uploads/${filePath}`;
+
+        return new Response(JSON.stringify({
+            data: {
+                fileName: fileName,
+                filePath: filePath,
+                publicUrl: publicUrl,
+                fileSize: file.size,
+                fileType: file.type
+            }
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+
+    } catch (error) {
+        console.error('Logged-in ad image upload error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'LOGGED_IN_AD_IMAGE_UPLOAD_FAILED',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

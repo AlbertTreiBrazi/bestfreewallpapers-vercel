@@ -1,0 +1,284 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    if (req.method !== 'POST') {
+        return new Response(JSON.stringify({
+            error: { code: 'METHOD_NOT_ALLOWED', message: 'Only POST method allowed' }
+        }), {
+            status: 405,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+
+    try {
+        // Get parameters from request body
+        const requestBody = await req.json();
+        const { email, password, full_name = 'Admin User' } = requestBody;
+
+        if (!email || !password) {
+            return new Response(JSON.stringify({
+                error: { code: 'MISSING_PARAMS', message: 'Email and password are required' }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 400,
+            });
+        }
+
+        // Validate email format
+        const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+        if (!emailRegex.test(email)) {
+            return new Response(JSON.stringify({
+                error: { code: 'INVALID_EMAIL', message: 'Invalid email format' }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 400,
+            });
+        }
+
+        // Validate password strength
+        if (password.length < 6) {
+            return new Response(JSON.stringify({
+                error: { code: 'WEAK_PASSWORD', message: 'Password must be at least 6 characters long' }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 400,
+            });
+        }
+
+        // Get environment variables
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            return new Response(JSON.stringify({
+                error: { code: 'CONFIG_ERROR', message: 'Missing Supabase configuration' }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 500,
+            });
+        }
+
+        // Step 1: Create user via Supabase Admin API
+        console.log('Creating admin user via Admin API...');
+        const createUserResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json',
+                'apikey': serviceRoleKey,
+            },
+            body: JSON.stringify({
+                email: email,
+                password: password,
+                email_confirm: true,
+                user_metadata: { 
+                    full_name: full_name,
+                    role: 'admin'
+                }
+            })
+        });
+
+        if (!createUserResponse.ok) {
+            const errorText = await createUserResponse.text();
+            console.error('User creation failed:', errorText);
+            return new Response(JSON.stringify({
+                error: {
+                    code: 'USER_CREATION_FAILED',
+                    message: `Failed to create user: ${errorText}`,
+                    details: { status: createUserResponse.status }
+                }
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 500,
+            });
+        }
+
+        const userData = await createUserResponse.json();
+        console.log('User created successfully:', userData.id);
+
+        // Step 2: Create or update admin profile in single transaction
+        console.log('Creating/updating admin profile...');
+        const now = new Date().toISOString();
+        const profileData = {
+            user_id: userData.id,
+            email: email,
+            full_name: full_name,
+            plan_type: 'premium',
+            is_admin: true,
+            premium_expires_at: null, // Admin never expires
+            created_at: now,
+            updated_at: now
+        };
+
+        // First try to create the profile
+        let createProfileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json',
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(profileData)
+        });
+
+        let profileData_result;
+        
+        if (!createProfileResponse.ok) {
+            const errorText = await createProfileResponse.text();
+            
+            // If profile already exists (duplicate key error), update it instead
+            if (errorText.includes('23505') || errorText.includes('duplicate key')) {
+                console.log('Profile exists, updating instead...');
+                
+                const updateProfileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userData.id}`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'return=representation'
+                    },
+                    body: JSON.stringify({
+                        email: email,
+                        full_name: full_name,
+                        plan_type: 'premium',
+                        is_admin: true,
+                        premium_expires_at: null,
+                        updated_at: now
+                    })
+                });
+                
+                if (!updateProfileResponse.ok) {
+                    const updateErrorText = await updateProfileResponse.text();
+                    console.error('Profile update failed:', updateErrorText);
+                    
+                    // Rollback: Delete the user we just created
+                    console.log('Rolling back user creation...');
+                    await fetch(`${supabaseUrl}/auth/v1/admin/users/${userData.id}`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Bearer ${serviceRoleKey}`,
+                            'apikey': serviceRoleKey,
+                        }
+                    });
+                    
+                    return new Response(JSON.stringify({
+                        error: {
+                            code: 'PROFILE_UPDATE_FAILED',
+                            message: `Failed to update admin profile: ${updateErrorText}. User creation rolled back.`
+                        }
+                    }), {
+                        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                        status: 500,
+                    });
+                }
+                
+                profileData_result = await updateProfileResponse.json();
+                console.log('Admin profile updated successfully:', profileData_result[0]?.user_id);
+            } else {
+                console.error('Profile creation failed:', errorText);
+                
+                // Rollback: Delete the user we just created
+                console.log('Rolling back user creation...');
+                await fetch(`${supabaseUrl}/auth/v1/admin/users/${userData.id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey,
+                    }
+                });
+                
+                return new Response(JSON.stringify({
+                    error: {
+                        code: 'PROFILE_CREATION_FAILED',
+                        message: `Failed to create admin profile: ${errorText}. User creation rolled back.`
+                    }
+                }), {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                    status: 500,
+                });
+            }
+        } else {
+            profileData_result = await createProfileResponse.json();
+            console.log('Admin profile created successfully:', profileData_result[0]?.user_id);
+        }
+
+        // Step 3: Verify admin privileges were set correctly
+        console.log('Verifying admin privileges...');
+        const verifyResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userData.id}&select=is_admin,plan_type,email`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey
+            }
+        });
+
+        if (verifyResponse.ok) {
+            const verifyData = await verifyResponse.json();
+            const adminProfile = verifyData[0];
+            
+            if (!adminProfile?.is_admin) {
+                console.warn('Admin privileges not set correctly');
+            } else {
+                console.log('Admin privileges verified successfully');
+            }
+        }
+
+        // Return success response with comprehensive details
+        return new Response(JSON.stringify({
+            success: true,
+            message: 'Admin user created successfully with full privileges',
+            data: {
+                user: {
+                    id: userData.id,
+                    email: userData.email,
+                    created_at: userData.created_at,
+                    email_confirmed_at: userData.email_confirmed_at
+                },
+                profile: {
+                    user_id: userData.id,
+                    email: email,
+                    full_name: full_name,
+                    is_admin: true,
+                    plan_type: 'premium',
+                    created_at: now
+                },
+                credentials: {
+                    email: email,
+                    note: 'Use the provided password to login'
+                },
+                next_steps: [
+                    'Admin user can now login with provided credentials',
+                    'Admin has full access to admin dashboard',
+                    'Admin has premium privileges with no expiration',
+                    'Profile is automatically created and linked'
+                ]
+            }
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+
+    } catch (error) {
+        console.error('Transactional admin creation error:', error);
+        return new Response(JSON.stringify({
+            error: { 
+                code: 'FUNCTION_ERROR', 
+                message: error.message,
+                details: 'An unexpected error occurred during admin creation'
+            }
+        }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+        });
+    }
+});

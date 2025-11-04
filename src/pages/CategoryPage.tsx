@@ -1,0 +1,490 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
+import { useTheme } from '@/contexts/ThemeContext'
+import { EnhancedWallpaperCardAdapter } from '@/components/wallpapers/EnhancedWallpaperCardAdapter'
+import { SortDropdown, type SortOption } from '@/components/ui/SortDropdown'
+import { useSort } from '@/hooks/useSort'
+import { CategoryNavigationHelper, CategoryBreadcrumb } from '@/components/category/CategoryNavigationHelper'
+import { SEOHead } from '@/components/seo/SEOHead'
+import { CATEGORY_SEO, generateBreadcrumbSchema, generateWallpaperSchema } from '@/utils/seo'
+import { ArrowLeft, Grid, List, Search } from 'lucide-react'
+import { useCancellableRequest } from '@/hooks/useCancellableRequest'
+import { ApiError } from '@/utils/api-helpers'
+import { logError, logWarn } from '@/utils/errorLogger'
+
+export function CategoryPage() {
+  const { slug } = useParams<{ slug: string }>()
+  const navigate = useNavigate()
+  const { theme } = useTheme()
+  const { fetch: fetchCancellable, cancelAll } = useCancellableRequest()
+  const [wallpapers, setWallpapers] = useState<any[]>([])
+  const [category, setCategory] = useState<any>(null)
+  const [breadcrumbs, setBreadcrumbs] = useState<Array<{name: string, url: string}>>([])
+  const [loading, setLoading] = useState(true)
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [searchQuery, setSearchQuery] = useState('')
+  
+  // Sort functionality
+  const { sortBy, setSortBy, applySorting } = useSort({ defaultSort: 'newest' })
+  
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const wallpapersPerPage = 16
+
+  const loadCategory = useCallback(async () => {
+    if (!slug) return
+    
+    try {
+      // Use the new categories-api endpoint with timeout protection
+      const response = await fetchCancellable(
+        `category-${slug}`,
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/categories-api`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000, // 15s timeout
+          retries: 1
+        }
+      )
+      
+      if (response.ok) {
+        const result = await response.json()
+        const categories = result.data || []
+        // Find the category by slug
+        const foundCategory = categories.find((cat: any) => cat.slug === slug)
+        
+        if (foundCategory) {
+          setCategory(foundCategory)
+          // Set up breadcrumbs
+          setBreadcrumbs([
+            { name: 'Home', url: '/' },
+            { name: 'Categories', url: '/categories' },
+            { name: foundCategory.name, url: `/category/${foundCategory.slug}` }
+          ])
+        } else {
+          logWarn('Category not found', { slug, context: 'CategoryPage' })
+        }
+      } else {
+        throw new Error(`Error loading categories (${response.status})`)
+      }
+    } catch (error: any) {
+      // Ignore AbortError when user navigates away
+      if (error.name === 'AbortError') {
+        logWarn('Category request cancelled', { slug, context: 'CategoryPage' })
+        return
+      }
+      
+      // Log structured error
+      if (error instanceof ApiError) {
+        logError('Category API timeout', error, { slug, context: 'CategoryPage' })
+      } else {
+        logError('Category load failed', error, { slug, context: 'CategoryPage' })
+      }
+    }
+  }, [slug, fetchCancellable])
+
+  const loadWallpapers = useCallback(async () => {
+    if (!slug || !category) return
+    
+    setLoading(true)
+    try {
+      // Use the new wallpapers-api endpoint with timeout protection
+      const response = await fetchCancellable(
+        `wallpapers-${slug}-${sortBy}-${searchQuery}-${currentPage}`,
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/wallpapers-api`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({
+            category: slug, // Use slug instead of category ID
+            device_type: 'mobile', // Filter for 9:16 portrait wallpapers only
+            search: searchQuery,
+            sort: sortBy,
+            page: currentPage,
+            limit: wallpapersPerPage
+          }),
+          timeout: 15000, // 15s timeout
+          retries: 1
+        }
+      )
+      
+      if (response.ok) {
+        const result = await response.json()
+        if (result.data) {
+          setWallpapers(result.data.wallpapers || [])
+          setTotalPages(Math.ceil((result.data.totalCount || 0) / wallpapersPerPage))
+        } else {
+          setWallpapers([])
+          setTotalPages(1)
+        }
+      } else {
+        const errorText = await response.text()
+        logError('Wallpapers API error', new Error(`${response.status}: ${errorText}`), {
+          slug,
+          sortBy,
+          searchQuery,
+          page: currentPage,
+          context: 'CategoryPage'
+        })
+        setWallpapers([])
+        setTotalPages(1)
+      }
+    } catch (error: any) {
+      // Ignore AbortError when user navigates away or changes filters
+      if (error.name === 'AbortError') {
+        logWarn('Wallpapers request cancelled', { slug, context: 'CategoryPage' })
+        return
+      }
+      
+      // Log structured error
+      if (error instanceof ApiError) {
+        logError('Wallpapers API timeout', error, { slug, context: 'CategoryPage' })
+      } else {
+        logError('Wallpapers load failed', error, { slug, context: 'CategoryPage' })
+      }
+      setWallpapers([])
+      setTotalPages(1)
+    } finally {
+      setLoading(false)
+    }
+  }, [slug, sortBy, searchQuery, currentPage, category, fetchCancellable])
+
+  useEffect(() => {
+    if (slug) {
+      loadCategory()
+    }
+    // Cleanup on unmount
+    return () => cancelAll()
+  }, [loadCategory, cancelAll])
+
+  useEffect(() => {
+    if (slug) {
+      loadWallpapers()
+    }
+  }, [loadWallpapers])
+
+  // Remove the dependency on category ID since we now use slug directly
+
+  const handleSearch = (query: string) => {
+    const sanitizedQuery = query.replace(/[<>"'%;()&+]/g, '').trim().substring(0, 100)
+    setSearchQuery(sanitizedQuery)
+    setCurrentPage(1)
+  }
+
+  const handleSortChange = (sortValue: SortOption) => {
+    setSortBy(sortValue)
+    setCurrentPage(1)
+  }
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page)
+    window.scrollTo(0, 0)
+  }
+
+  // Generate SEO configuration for the category
+  const getSEOConfig = () => {
+    if (!category) return null
+
+    const categoryKey = Object.keys(CATEGORY_SEO).find(
+      key => key.toLowerCase() === category.slug?.toLowerCase()
+    )
+    
+    const baseSEO = categoryKey ? CATEGORY_SEO[categoryKey] : {}
+    
+    return {
+      title: baseSEO.title || `Best Free ${category.name} Wallpapers - HD Downloads`,
+      description: baseSEO.description || `Download the best free ${category.name.toLowerCase()} wallpapers in HD quality. Browse our collection of ${category.name.toLowerCase()} backgrounds and desktop images.`,
+      keywords: baseSEO.keywords || [`best free ${category.name.toLowerCase()} wallpapers`, `${category.name.toLowerCase()} wallpapers`, `free ${category.name.toLowerCase()}`],
+      image: `/images/og-${category.slug}.jpg`
+    }
+  }
+
+  // Generate structured data
+  const structuredData = []
+  
+  // Add breadcrumb schema
+  if (breadcrumbs.length > 0) {
+    structuredData.push(generateBreadcrumbSchema(breadcrumbs))
+  }
+  
+  // Add wallpaper schemas
+  if (wallpapers.length > 0) {
+    wallpapers.slice(0, 6).forEach(wallpaper => {
+      structuredData.push(generateWallpaperSchema(wallpaper))
+    })
+  }
+
+  if (!category && !loading) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center ${
+        theme === 'dark' ? 'bg-gray-900' : 'bg-gray-50'
+      }`}>
+        <div className="text-center">
+          <h1 className={`text-2xl font-bold mb-4 ${
+            theme === 'dark' ? 'text-white' : 'text-gray-900'
+          }`}>Category Not Found</h1>
+          <button
+            onClick={() => navigate('/wallpapers')}
+            className="text-gray-600 hover:text-gray-700 font-semibold"
+          >
+            Back to All Wallpapers
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={`min-h-screen ${
+      theme === 'dark' ? 'bg-gray-900' : 'bg-gray-50'
+    }`}>
+      {/* SEO Head with category-specific optimization */}
+      {category && (
+        <SEOHead 
+          config={getSEOConfig()!} 
+          structuredData={structuredData}
+        />
+      )}
+      {/* Header */}
+      <div className={`border-b ${
+        theme === 'dark' 
+          ? 'bg-gray-800 border-gray-700' 
+          : 'bg-white border-gray-200'
+      }`}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center space-x-4">
+              <button
+                onClick={() => navigate('/wallpapers')}
+                className={`inline-flex items-center transition-colors ${
+                  theme === 'dark'
+                    ? 'text-gray-400 hover:text-gray-200'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <ArrowLeft className="w-5 h-5 mr-2" />
+                Back to All Wallpapers
+              </button>
+            </div>
+          </div>
+          
+          <div className="mt-4">
+            <h1 className={`text-3xl font-bold mb-2 ${
+              theme === 'dark' ? 'text-white' : 'text-gray-900'
+            }`}>
+              Best Free {category?.name || 'Loading...'} Wallpapers
+            </h1>
+            <p className={theme === 'dark' ? 'text-gray-300' : 'text-gray-600'}>
+              {searchQuery ? `Search results in ${category?.name}` : 
+               `Download the best free ${category?.name?.toLowerCase()} wallpapers in HD quality`}
+            </p>
+          </div>
+
+          {/* Controls */}
+          <div className="mt-6 flex flex-col sm:flex-row gap-4 justify-between">
+            {/* Search Bar */}
+            <div className="relative flex-1 max-w-md">
+              <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 ${
+                theme === 'dark' ? 'text-gray-500' : 'text-gray-400'
+              }`} />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder={`Search in ${category?.name || 'category'}...`}
+                className={`w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-gray-500 focus:border-transparent ${
+                  theme === 'dark'
+                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400'
+                    : 'bg-white border-gray-300 text-gray-900'
+                }`}
+              />
+            </div>
+            
+            {/* Sort Dropdown */}
+            <div className="flex items-center space-x-4">
+              <SortDropdown
+                value={sortBy}
+                onChange={handleSortChange}
+                disabled={loading}
+              />
+              
+              {/* View Mode Toggle */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setViewMode('grid')}
+                  className={`p-2 rounded-lg ${
+                    viewMode === 'grid' 
+                      ? 'bg-gray-100 text-gray-600 dark:bg-purple-900 dark:text-purple-300' 
+                      : theme === 'dark'
+                        ? 'text-gray-400 hover:text-gray-300'
+                        : 'text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  <Grid className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setViewMode('list')}
+                  className={`p-2 rounded-lg ${
+                    viewMode === 'list' 
+                      ? 'bg-gray-100 text-gray-600 dark:bg-purple-900 dark:text-purple-300' 
+                      : theme === 'dark'
+                        ? 'text-gray-400 hover:text-gray-300'
+                        : 'text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  <List className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Navigation Helper */}
+        <CategoryBreadcrumb 
+          categoryName={category?.name}
+          className="mb-4"
+        />
+        
+        <CategoryNavigationHelper 
+          categoryName={category?.name}
+          className="mb-6"
+        />
+        {/* Results Info */}
+        <div className="mb-6">
+          <p className={`text-sm ${
+            theme === 'dark' ? 'text-gray-300' : 'text-gray-600'
+          }`}>
+            {loading ? 'Loading...' : `Showing ${wallpapers.length} wallpapers`}
+            {totalPages > 1 && !loading && ` (Page ${currentPage} of ${totalPages})`}
+          </p>
+        </div>
+
+        {/* Wallpapers Grid */}
+        {loading ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+            {[...Array(8)].map((_, i) => (
+              <div key={i} className="animate-pulse">
+                <div className={`rounded-lg aspect-video mb-4 ${
+                  theme === 'dark' ? 'bg-gray-600' : 'bg-gray-300'
+                }`}></div>
+                <div className={`h-4 rounded mb-2 ${
+                  theme === 'dark' ? 'bg-gray-600' : 'bg-gray-300'
+                }`}></div>
+                <div className={`h-3 rounded w-3/4 ${
+                  theme === 'dark' ? 'bg-gray-600' : 'bg-gray-300'
+                }`}></div>
+              </div>
+            ))}
+          </div>
+        ) : wallpapers.length > 0 ? (
+          <div className={viewMode === 'grid' ? 
+            'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4' :
+            'space-y-6'
+          }>
+            {wallpapers.map((wallpaper) => (
+              <EnhancedWallpaperCardAdapter
+                key={wallpaper.id}
+                wallpaper={wallpaper}
+                variant="compact"
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-12">
+            <div className={theme === 'dark' ? 'text-gray-500' : 'text-gray-400'}>
+              <Search className="w-16 h-16 mx-auto mb-4" />
+            </div>
+            <h3 className={`text-lg font-semibold mb-2 ${
+              theme === 'dark' ? 'text-white' : 'text-gray-900'
+            }`}>
+              No wallpapers found
+            </h3>
+            <p className={`mb-4 ${
+              theme === 'dark' ? 'text-gray-300' : 'text-gray-600'
+            }`}>
+              {searchQuery ? 
+                `No wallpapers found in ${category?.name} matching "${searchQuery}"` :
+                `No wallpapers available in ${category?.name} category yet.`
+              }
+            </p>
+            {searchQuery && (
+              <button
+                onClick={() => {
+                  setSearchQuery('')
+                  setCurrentPage(1)
+                }}
+                className="text-gray-600 hover:text-gray-700 font-semibold"
+              >
+                Clear search
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Pagination */}
+        {totalPages > 1 && !loading && (
+          <div className="mt-12 flex justify-center">
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => handlePageChange(currentPage - 1)}
+                disabled={currentPage === 1}
+                className={`px-4 py-2 border rounded-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+                  theme === 'dark'
+                    ? 'border-gray-600 text-gray-300 hover:bg-gray-700'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                Previous
+              </button>
+              
+              {/* Page Numbers */}
+              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                const page = i + 1
+                return (
+                  <button
+                    key={page}
+                    onClick={() => handlePageChange(page)}
+                    className={`px-4 py-2 border rounded-lg ${
+                      currentPage === page
+                        ? 'bg-gray-600 text-white border-gray-600'
+                        : theme === 'dark'
+                          ? 'border-gray-600 text-gray-300 hover:bg-gray-700'
+                          : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    {page}
+                  </button>
+                )
+              })}
+              
+              <button
+                onClick={() => handlePageChange(currentPage + 1)}
+                disabled={currentPage === totalPages}
+                className={`px-4 py-2 border rounded-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+                  theme === 'dark'
+                    ? 'border-gray-600 text-gray-300 hover:bg-gray-700'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}      </div>
+    </div>
+  )
+}
+
+export default CategoryPage

@@ -1,0 +1,205 @@
+// Secure File Download Function - Anonymous Access with Token Validation
+
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const url = new URL(req.url);
+        const pathParts = url.pathname.split('/');
+        const wallpaperId = pathParts[pathParts.length - 1];
+
+        // Parse query parameters for signed URL
+        const resolution = url.searchParams.get('resolution');
+        const expires = url.searchParams.get('expires');
+        const signature = url.searchParams.get('signature');
+        const userId = url.searchParams.get('user');
+
+        if (!wallpaperId || isNaN(Number(wallpaperId))) {
+            return new Response(JSON.stringify({ error: 'Invalid wallpaper ID' }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        if (!expires || !signature || !userId || !resolution) {
+            return new Response(JSON.stringify({ error: 'Missing required parameters' }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            return new Response(JSON.stringify({ error: 'Server configuration error' }), {
+                status: 500,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Validate signature and expiration
+        const expiresAt = parseInt(expires);
+        const currentTime = Math.floor(Date.now() / 1000);
+        
+        if (currentTime > expiresAt) {
+            return new Response(JSON.stringify({ error: 'Download URL has expired' }), {
+                status: 410,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Verify the signature
+        const signatureData = `${wallpaperId}-${resolution}-${userId}-${expiresAt}`;
+        const expectedSignature = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signatureData + serviceRoleKey));
+        const expectedSignatureHex = Array.from(new Uint8Array(expectedSignature)).map(b => b.toString(16).padStart(2, '0')).join('');
+        
+        if (signature !== expectedSignatureHex.substring(0, 16)) {
+            return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+                status: 403,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Verify user has access (get their profile to check premium status)
+        const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=plan_type,premium_expires_at`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (profileResponse.ok) {
+            const profiles = await profileResponse.json();
+            const profile = profiles[0];
+            
+            if (profile) {
+                const isPremiumUser = profile.subscription_tier === 'premium' && 
+                                     profile.subscription_status === 'active';
+                
+                // Check if user needs premium access for this resolution
+                if ((resolution === '4k' || resolution === '8k') && !isPremiumUser) {
+                    return new Response(JSON.stringify({ error: `Premium subscription required for ${resolution.toUpperCase()} downloads` }), {
+                        status: 403,
+                        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                    });
+                }
+            }
+        }
+
+        // Get wallpaper data from database
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=*`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            return new Response(JSON.stringify({ error: 'Wallpaper not found' }), {
+                status: 404,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            return new Response(JSON.stringify({ error: 'Wallpaper not found' }), {
+                status: 404,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        const wallpaper = wallpapers[0];
+        let imageUrl;
+
+        // Determine which image URL to use based on resolution
+        switch (resolution) {
+            case '4k':
+                imageUrl = wallpaper.resolution_4k || wallpaper.download_url || wallpaper.image_url;
+                break;
+            case '8k':
+                imageUrl = wallpaper.resolution_8k || wallpaper.resolution_4k || wallpaper.download_url || wallpaper.image_url;
+                break;
+            case '1080p':
+            default:
+                imageUrl = wallpaper.resolution_1080p || wallpaper.download_url || wallpaper.image_url;
+                break;
+        }
+
+        if (!imageUrl) {
+            return new Response(JSON.stringify({ error: 'Image URL not available' }), {
+                status: 404,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Fetch the image with proper error handling
+        let imageResponse;
+        try {
+            imageResponse = await fetch(imageUrl, {
+                headers: {
+                    'User-Agent': 'Supabase-Edge-Function/1.0',
+                    'Accept': 'image/*,*/*'
+                },
+                signal: AbortSignal.timeout(15000) // 15 second timeout
+            });
+            
+            if (!imageResponse.ok) {
+                throw new Error(`Failed to fetch image: ${imageResponse.status}`);
+            }
+        } catch (fetchError) {
+            console.error(`Failed to fetch image from ${imageUrl}:`, fetchError);
+            return new Response(JSON.stringify({ error: 'Failed to fetch image' }), {
+                status: 502,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Get the image data
+        const imageData = await imageResponse.arrayBuffer();
+        const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
+
+        // Set appropriate headers for download
+        const headers = {
+            ...corsHeaders,
+            'Content-Type': contentType,
+            'Content-Length': imageData.byteLength.toString(),
+            'Content-Disposition': `attachment; filename="${wallpaper.title.replace(/[^a-zA-Z0-9]/g, '_')}_${resolution}.${contentType.split('/')[1] || 'jpg'}"`,
+            'Cache-Control': 'no-cache, no-store, must-revalidate'
+        };
+
+        return new Response(imageData, {
+            status: 200,
+            headers
+        });
+
+    } catch (error) {
+        console.error('Secure download error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'SECURE_DOWNLOAD_FAILED',
+                message: error.message || 'Internal server error'
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

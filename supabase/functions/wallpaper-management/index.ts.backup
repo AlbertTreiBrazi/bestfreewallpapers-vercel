@@ -1,0 +1,927 @@
+// Enhanced Wallpaper Management with Comprehensive Cache Invalidation
+// Handles all wallpaper and collection operations with automatic cache clearing
+
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const requestData = await req.json();
+    const { action } = requestData;
+
+    // Get Supabase service role key
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+    if (!serviceRoleKey || !supabaseUrl) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const supabaseHeaders = {
+      'Authorization': `Bearer ${serviceRoleKey}`,
+      'apikey': serviceRoleKey,
+      'Content-Type': 'application/json'
+    };
+
+    let responseData = {};
+
+    switch (action) {
+      case 'GET_CATEGORY_WALLPAPERS': {
+        const { category_slug } = requestData;
+        
+        if (!category_slug) {
+          throw new Error('Category slug is required');
+        }
+
+        // First get the category
+        const categoryResponse = await fetch(`${supabaseUrl}/rest/v1/categories?slug=eq.${category_slug}&select=*`, {
+          headers: supabaseHeaders
+        });
+
+        if (!categoryResponse.ok) {
+          throw new Error('Failed to fetch category');
+        }
+
+        const categories = await categoryResponse.json();
+        if (categories.length === 0) {
+          throw new Error('Category not found');
+        }
+
+        const category = categories[0];
+
+        // Get wallpapers for this category
+        const wallpapersResponse = await fetch(
+          `${supabaseUrl}/rest/v1/wallpapers?category_id=eq.${category.id}&is_published=eq.true&is_active=eq.true&select=*&order=created_at.desc`,
+          { headers: supabaseHeaders }
+        );
+
+        if (!wallpapersResponse.ok) {
+          throw new Error('Failed to fetch wallpapers');
+        }
+
+        const wallpapers = await wallpapersResponse.json();
+
+        responseData = {
+          success: true,
+          category,
+          wallpapers,
+          total_count: wallpapers.length
+        };
+        break;
+      }
+
+      case 'get_wallpapers': {
+        const { category = 'all', search = '', sort = 'newest', page = 1, limit = 12, is_premium } = requestData;
+        const offset = (page - 1) * limit;
+        
+        let query = `select=*,categories(id,name,slug)&order=`;
+        
+        // Apply sorting
+        switch (sort) {
+          case 'newest':
+            query += 'created_at.desc';
+            break;
+          case 'popular':
+            query += 'download_count.desc,created_at.desc';
+            break;
+          case 'title_asc':
+            query += 'title.asc';
+            break;
+          case 'title_desc':
+            query += 'title.desc';
+            break;
+          default:
+            query += 'created_at.desc';
+        }
+        
+        query += `&limit=${limit}&offset=${offset}&is_published=eq.true&is_active=eq.true`;
+        
+        // Filter by premium status
+        if (is_premium !== undefined) {
+          query += `&is_premium=eq.${is_premium}`;
+        }
+        
+        if (category && category !== 'all') {
+          // First get category ID by slug
+          const categoryResponse = await fetch(`${supabaseUrl}/rest/v1/categories?select=id&slug=eq.${category}`, {
+            headers: supabaseHeaders
+          });
+          
+          if (categoryResponse.ok) {
+            const categories = await categoryResponse.json();
+            if (categories.length > 0) {
+              query += `&category_id=eq.${categories[0].id}`;
+            }
+          }
+        }
+        
+        if (search) {
+          const sanitizedSearch = search.replace(/[<>"'%;()&+]/g, '').trim();
+          if (sanitizedSearch) {
+            query += `&or=(title.ilike.*${encodeURIComponent(sanitizedSearch)}*,description.ilike.*${encodeURIComponent(sanitizedSearch)}*)`;
+          }
+        }
+        
+        // Get wallpapers
+        const wallpapersResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?${query}`, {
+          headers: supabaseHeaders
+        });
+        
+        if (!wallpapersResponse.ok) {
+          throw new Error('Failed to fetch wallpapers');
+        }
+        
+        const wallpapers = await wallpapersResponse.json();
+        
+        // Get total count for pagination
+        let countQuery = `select=id&is_published=eq.true&is_active=eq.true`;
+        
+        if (is_premium !== undefined) {
+          countQuery += `&is_premium=eq.${is_premium}`;
+        }
+        
+        if (category && category !== 'all') {
+          const categoryResponse = await fetch(`${supabaseUrl}/rest/v1/categories?select=id&slug=eq.${category}`, {
+            headers: supabaseHeaders
+          });
+          
+          if (categoryResponse.ok) {
+            const categories = await categoryResponse.json();
+            if (categories.length > 0) {
+              countQuery += `&category_id=eq.${categories[0].id}`;
+            }
+          }
+        }
+        
+        if (search) {
+          const sanitizedSearch = search.replace(/[<>"'%;()&+]/g, '').trim();
+          if (sanitizedSearch) {
+            countQuery += `&or=(title.ilike.*${encodeURIComponent(sanitizedSearch)}*,description.ilike.*${encodeURIComponent(sanitizedSearch)}*)`;
+          }
+        }
+        
+        const countResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?${countQuery}`, {
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'count=exact'
+          }
+        });
+        
+        const totalCount = countResponse.headers.get('content-range')?.split('/')[1] || 0;
+        const totalPages = Math.ceil(parseInt(totalCount) / limit);
+        
+        responseData = {
+          wallpapers,
+          totalPages,
+          totalCount: parseInt(totalCount),
+          currentPage: page
+        };
+        break;
+      }
+
+      case 'list': {
+        const { page = 1, limit = 50, category, search } = requestData;
+        const offset = (page - 1) * limit;
+        
+        let query = `select=*&order=created_at.desc&limit=${limit}&offset=${offset}`;
+        let countQuery = 'select=id';
+        
+        if (category && category !== 'all') {
+          query += `&category_id=eq.${category}`;
+          countQuery += `&category_id=eq.${category}`;
+        }
+        
+        if (search && search.trim()) {
+          const sanitizedSearch = encodeURIComponent(search.trim());
+          const searchFilter = `&or=(title.ilike.*${sanitizedSearch}*,description.ilike.*${sanitizedSearch}*)`;
+          query += searchFilter;
+          countQuery += searchFilter;
+        }
+
+        // Fetch wallpapers
+        const wallpapersResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?${query}`, {
+          headers: supabaseHeaders
+        });
+
+        if (!wallpapersResponse.ok) {
+          throw new Error('Failed to fetch wallpapers');
+        }
+
+        const wallpapers = await wallpapersResponse.json();
+        
+        // Get total count for pagination
+        const countResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?${countQuery}`, {
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'count=exact'
+          }
+        });
+
+        const totalCount = countResponse.headers.get('content-range')?.split('/')[1] || 0;
+        const totalPages = Math.ceil(parseInt(totalCount) / limit);
+
+        responseData = {
+          data: wallpapers,
+          pagination: {
+            page,
+            limit,
+            totalCount: parseInt(totalCount),
+            totalPages,
+            hasNext: page < totalPages,
+            hasPrev: page > 1
+          }
+        };
+        break;
+      }
+
+      case 'create': {
+        const { title, description, image_url, thumbnail_url, category_id, tags, is_premium, device_type, width, height } = requestData;
+        
+        if (!title || !image_url) {
+          throw new Error('Title and image URL are required');
+        }
+
+        const createResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers`, {
+          method: 'POST',
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify({
+            title: title.trim(),
+            description: description?.trim(),
+            image_url,
+            thumbnail_url: thumbnail_url || image_url,
+            category_id: category_id || null,
+            tags: tags || [],
+            is_premium: is_premium || false,
+            is_published: true,
+            is_active: true,
+            device_type: device_type || 'desktop',
+            width: width || 1920,
+            height: height || 1080,
+            download_count: 0,
+            download_url: image_url,
+            created_at: new Date().toISOString()
+          })
+        });
+
+        if (!createResponse.ok) {
+          const errorText = await createResponse.text();
+          throw new Error(`Failed to create wallpaper: ${errorText}`);
+        }
+
+        responseData = await createResponse.json();
+        
+        // Trigger cache invalidation for wallpaper creation
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: [
+            '/', // Home page
+            '/free-wallpapers', // Free wallpapers page
+            '/premium', // Premium page (if it's premium)
+            '/search', // Search results
+            ...(category_id ? await getCategoryPaths(supabaseUrl, supabaseHeaders, category_id) : [])
+          ],
+          type: 'wallpaper_created'
+        });
+        break;
+      }
+
+      case 'update': {
+        const { id, title, description, image_url, thumbnail_url, category_id, tags, is_premium, is_published, is_active, device_type, width, height } = requestData;
+        
+        if (!id) {
+          throw new Error('Wallpaper ID is required');
+        }
+
+        // Get original wallpaper to determine what paths need invalidation
+        const originalResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${id}&select=*,categories(slug)`, {
+          headers: supabaseHeaders
+        });
+        
+        let originalWallpaper = null;
+        if (originalResponse.ok) {
+          const original = await originalResponse.json();
+          originalWallpaper = original[0];
+        }
+
+        const updateData = {
+          updated_at: new Date().toISOString()
+        };
+
+        if (title !== undefined) updateData.title = title.trim();
+        if (description !== undefined) updateData.description = description?.trim();
+        if (image_url !== undefined) updateData.image_url = image_url;
+        if (thumbnail_url !== undefined) updateData.thumbnail_url = thumbnail_url;
+        if (category_id !== undefined) updateData.category_id = category_id;
+        if (tags !== undefined) updateData.tags = tags;
+        if (is_premium !== undefined) updateData.is_premium = is_premium;
+        if (is_published !== undefined) updateData.is_published = is_published;
+        if (is_active !== undefined) updateData.is_active = is_active;
+        if (device_type !== undefined) updateData.device_type = device_type;
+        if (width !== undefined) updateData.width = width;
+        if (height !== undefined) updateData.height = height;
+        if (image_url !== undefined && !thumbnail_url) updateData.download_url = image_url;
+
+        const updateResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${id}`, {
+          method: 'PATCH',
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify(updateData)
+        });
+
+        if (!updateResponse.ok) {
+          const errorText = await updateResponse.text();
+          throw new Error(`Failed to update wallpaper: ${errorText}`);
+        }
+
+        responseData = await updateResponse.json();
+        
+        // Comprehensive cache invalidation for wallpaper update
+        const invalidationPaths = [
+          '/', // Home page
+          '/free-wallpapers', // Free wallpapers page
+          '/premium', // Premium page
+          '/search' // Search results
+        ];
+        
+        // Add individual wallpaper page if we can determine the slug
+        if (originalWallpaper?.slug) {
+          invalidationPaths.push(`/wallpaper/${originalWallpaper.slug}`);
+        }
+        
+        // Add category paths (both old and new if category changed)
+        if (originalWallpaper?.categories?.slug) {
+          invalidationPaths.push(`/category/${originalWallpaper.categories.slug}`);
+        }
+        if (category_id && category_id !== originalWallpaper?.category_id) {
+          const newCategoryPaths = await getCategoryPaths(supabaseUrl, supabaseHeaders, category_id);
+          invalidationPaths.push(...newCategoryPaths);
+        }
+        
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: invalidationPaths,
+          type: 'wallpaper_updated'
+        });
+        break;
+      }
+
+      case 'delete': {
+        const { id } = requestData;
+        
+        if (!id) {
+          throw new Error('Wallpaper ID is required');
+        }
+
+        // Get wallpaper details before deletion for cache invalidation
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${id}&select=*,categories(slug)`, {
+          headers: supabaseHeaders
+        });
+        
+        let wallpaperData = null;
+        if (wallpaperResponse.ok) {
+          const wallpapers = await wallpaperResponse.json();
+          wallpaperData = wallpapers[0];
+        }
+
+        const deleteResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${id}`, {
+          method: 'DELETE',
+          headers: supabaseHeaders
+        });
+
+        if (!deleteResponse.ok) {
+          const errorText = await deleteResponse.text();
+          throw new Error(`Failed to delete wallpaper: ${errorText}`);
+        }
+
+        responseData = { success: true, message: 'Wallpaper deleted successfully' };
+        
+        // Cache invalidation for wallpaper deletion
+        const invalidationPaths = [
+          '/', // Home page
+          '/free-wallpapers', // Free wallpapers page
+          '/premium', // Premium page
+          '/search' // Search results
+        ];
+        
+        if (wallpaperData) {
+          if (wallpaperData.slug) {
+            invalidationPaths.push(`/wallpaper/${wallpaperData.slug}`);
+          }
+          if (wallpaperData.categories?.slug) {
+            invalidationPaths.push(`/category/${wallpaperData.categories.slug}`);
+          }
+        }
+        
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: invalidationPaths,
+          type: 'wallpaper_deleted'
+        });
+        break;
+      }
+
+      case 'collections': {
+        const collectionsResponse = await fetch(`${supabaseUrl}/rest/v1/collections?select=*&order=sort_order`, {
+          headers: supabaseHeaders
+        });
+
+        if (!collectionsResponse.ok) {
+          throw new Error('Failed to fetch collections');
+        }
+
+        responseData = await collectionsResponse.json();
+        break;
+      }
+
+      case 'create-collection': {
+        const { name, slug, description, thumbnail_url, is_featured, is_published, sort_order } = requestData;
+        
+        if (!name || !slug) {
+          throw new Error('Name and slug are required');
+        }
+
+        // Get auth token to set created_by field
+        const authHeader = req.headers.get('authorization');
+        let createdBy = null;
+        
+        if (authHeader) {
+          const token = authHeader.replace('Bearer ', '');
+          const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'apikey': serviceRoleKey
+            }
+          });
+          
+          if (userResponse.ok) {
+            const userData = await userResponse.json();
+            createdBy = userData.id;
+          }
+        }
+
+        const createResponse = await fetch(`${supabaseUrl}/rest/v1/collections`, {
+          method: 'POST',
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify({
+            name: name.trim(),
+            slug: slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+            description: description?.trim() || null,
+            cover_image_url: thumbnail_url || null,
+            is_featured: is_featured || false,
+            is_active: is_published !== undefined ? is_published : true,
+            sort_order: sort_order || 0,
+            wallpaper_count: 0,
+            created_by: createdBy,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+        });
+
+        if (!createResponse.ok) {
+          const errorText = await createResponse.text();
+          throw new Error(`Failed to create collection: ${errorText}`);
+        }
+
+        responseData = await createResponse.json();
+        
+        // Cache invalidation for collection creation
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: ['/collections'],
+          type: 'collection_created'
+        });
+        break;
+      }
+
+      case 'update-collection': {
+        const { id, name, slug, description, thumbnail_url, is_featured, is_published, sort_order } = requestData;
+        
+        if (!id) {
+          throw new Error('Collection ID is required');
+        }
+
+        const updateData = {
+          updated_at: new Date().toISOString()
+        };
+
+        if (name !== undefined) updateData.name = name.trim();
+        if (slug !== undefined) updateData.slug = slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+        if (description !== undefined) updateData.description = description?.trim();
+        if (thumbnail_url !== undefined) updateData.cover_image_url = thumbnail_url;
+        if (is_featured !== undefined) updateData.is_featured = is_featured;
+        if (is_published !== undefined) updateData.is_active = is_published;
+        if (sort_order !== undefined) updateData.sort_order = sort_order;
+
+        const updateResponse = await fetch(`${supabaseUrl}/rest/v1/collections?id=eq.${id}`, {
+          method: 'PATCH',
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify(updateData)
+        });
+
+        if (!updateResponse.ok) {
+          const errorText = await updateResponse.text();
+          throw new Error(`Failed to update collection: ${errorText}`);
+        }
+
+        responseData = await updateResponse.json();
+        
+        // Cache invalidation for collection update
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: [
+            '/collections',
+            `/collection/${id}`
+          ],
+          type: 'collection_updated'
+        });
+        break;
+      }
+
+      case 'delete-collection': {
+        const { id } = requestData;
+        
+        if (!id) {
+          throw new Error('Collection ID is required');
+        }
+
+        const deleteResponse = await fetch(`${supabaseUrl}/rest/v1/collections?id=eq.${id}`, {
+          method: 'DELETE',
+          headers: supabaseHeaders
+        });
+
+        if (!deleteResponse.ok) {
+          const errorText = await deleteResponse.text();
+          throw new Error(`Failed to delete collection: ${errorText}`);
+        }
+
+        responseData = { success: true, message: 'Collection deleted successfully' };
+        
+        // Cache invalidation for collection deletion
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: [
+            '/collections',
+            `/collection/${id}`
+          ],
+          type: 'collection_deleted'
+        });
+        break;
+      }
+
+      case 'add-wallpaper-to-collection': {
+        const { collection_id, wallpaper_id, sort_order = 0 } = requestData;
+        
+        if (!collection_id || !wallpaper_id) {
+          throw new Error('Collection ID and Wallpaper ID are required');
+        }
+
+        const addResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers`, {
+          method: 'POST',
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify({
+            collection_id,
+            wallpaper_id,
+            sort_order,
+            added_at: new Date().toISOString()
+          })
+        });
+
+        if (!addResponse.ok) {
+          const errorText = await addResponse.text();
+          throw new Error(`Failed to add wallpaper to collection: ${errorText}`);
+        }
+
+        responseData = await addResponse.json();
+        
+        // Cache invalidation for adding wallpaper to collection
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: [
+            '/collections',
+            `/collection/${collection_id}`
+          ],
+          type: 'collection_wallpaper_added'
+        });
+        break;
+      }
+
+      case 'remove-wallpaper-from-collection': {
+        const { collection_id, wallpaper_id } = requestData;
+        
+        if (!collection_id || !wallpaper_id) {
+          throw new Error('Collection ID and Wallpaper ID are required');
+        }
+
+        const removeResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection_id}&wallpaper_id=eq.${wallpaper_id}`, {
+          method: 'DELETE',
+          headers: supabaseHeaders
+        });
+
+        if (!removeResponse.ok) {
+          const errorText = await removeResponse.text();
+          throw new Error(`Failed to remove wallpaper from collection: ${errorText}`);
+        }
+
+        responseData = { success: true, message: 'Wallpaper removed from collection successfully' };
+        
+        // Cache invalidation for removing wallpaper from collection
+        await invalidateCache(supabaseUrl, supabaseHeaders, {
+          paths: [
+            '/collections',
+            `/collection/${collection_id}`
+          ],
+          type: 'collection_wallpaper_removed'
+        });
+        break;
+      }
+
+      case 'categories': {
+        const categoriesResponse = await fetch(`${supabaseUrl}/rest/v1/categories?select=*&order=sort_order`, {
+          headers: supabaseHeaders
+        });
+
+        if (!categoriesResponse.ok) {
+          throw new Error('Failed to fetch categories');
+        }
+
+        responseData = await categoriesResponse.json();
+        break;
+      }
+
+      case 'get-collection-wallpapers': {
+        const { collection_id, page = 1, limit = 20 } = requestData;
+        const offset = (page - 1) * limit;
+        
+        if (!collection_id) {
+          throw new Error('Collection ID is required');
+        }
+
+        const wallpapersResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection_id}&select=*,wallpapers(*)&order=sort_order&limit=${limit}&offset=${offset}`, {
+          headers: supabaseHeaders
+        });
+
+        if (!wallpapersResponse.ok) {
+          throw new Error('Failed to fetch collection wallpapers');
+        }
+
+        const collectionWallpapers = await wallpapersResponse.json();
+        
+        // Get total count
+        const countResponse = await fetch(`${supabaseUrl}/rest/v1/collection_wallpapers?collection_id=eq.${collection_id}&select=id`, {
+          headers: {
+            ...supabaseHeaders,
+            'Prefer': 'count=exact'
+          }
+        });
+
+        const totalCount = countResponse.headers.get('content-range')?.split('/')[1] || 0;
+        const totalPages = Math.ceil(parseInt(totalCount) / limit);
+
+        responseData = {
+          data: collectionWallpapers.map(cw => cw.wallpapers),
+          pagination: {
+            page,
+            limit,
+            totalCount: parseInt(totalCount),
+            totalPages
+          }
+        };
+        break;
+      }
+
+      case 'upload-image': {
+        const { imageData, fileName } = requestData;
+        
+        if (!imageData || !fileName) {
+          throw new Error('Image data and filename are required');
+        }
+
+        try {
+          // Validate image data format
+          if (!imageData.startsWith('data:image/')) {
+            throw new Error('Invalid image data format');
+          }
+
+          // Extract base64 data from data URL
+          const base64Data = imageData.split(',')[1];
+          if (!base64Data) {
+            throw new Error('No base64 data found in image');
+          }
+
+          const mimeType = imageData.split(';')[0].split(':')[1] || 'image/jpeg';
+          
+          // Validate file type
+          const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+          if (!allowedTypes.includes(mimeType)) {
+            throw new Error(`File type ${mimeType} not allowed. Allowed types: ${allowedTypes.join(', ')}`);
+          }
+
+          // Convert base64 to binary
+          const binaryData = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+          
+          // Check file size (max 10MB)
+          const maxSize = 10 * 1024 * 1024; // 10MB
+          if (binaryData.length > maxSize) {
+            throw new Error(`File too large. Maximum size: ${maxSize / 1024 / 1024}MB, actual size: ${(binaryData.length / 1024 / 1024).toFixed(2)}MB`);
+          }
+
+          // Use a simpler bucket name that's more likely to work
+          const bucketName = 'wallpapers';
+          
+          // Try direct upload first
+          const uploadResponse = await fetch(`${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${serviceRoleKey}`,
+              'apikey': serviceRoleKey,
+              'Content-Type': mimeType,
+              'x-upsert': 'true'
+            },
+            body: binaryData
+          });
+
+          let publicUrl;
+          
+          if (!uploadResponse.ok) {
+            const errorText = await uploadResponse.text();
+            console.error('Upload error details:', {
+              status: uploadResponse.status,
+              statusText: uploadResponse.statusText,
+              error: errorText,
+              headers: Object.fromEntries(uploadResponse.headers.entries())
+            });
+            
+            // If bucket doesn't exist, try to create it and retry
+            if (uploadResponse.status === 404 || errorText.includes('bucket')) {
+              console.log('Attempting to create bucket:', bucketName);
+              
+              // Create bucket
+              const createBucketResponse = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${serviceRoleKey}`,
+                  'apikey': serviceRoleKey,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  id: bucketName,
+                  name: bucketName,
+                  public: true,
+                  allowedMimeTypes: allowedTypes,
+                  fileSizeLimit: maxSize
+                })
+              });
+
+              if (createBucketResponse.ok) {
+                console.log('Bucket created successfully, retrying upload');
+                
+                // Retry upload
+                const retryUploadResponse = await fetch(`${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`, {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Content-Type': mimeType,
+                    'x-upsert': 'true'
+                  },
+                  body: binaryData
+                });
+
+                if (!retryUploadResponse.ok) {
+                  const retryErrorText = await retryUploadResponse.text();
+                  throw new Error(`Upload failed after bucket creation: ${retryErrorText}`);
+                }
+                
+                publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+              } else {
+                const bucketErrorText = await createBucketResponse.text();
+                throw new Error(`Failed to create bucket and upload file: ${bucketErrorText}`);
+              }
+            } else {
+              throw new Error(`Upload failed: ${errorText}`);
+            }
+          } else {
+            publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+          }
+
+          console.log('Upload successful:', {
+            fileName,
+            fileSize: binaryData.length,
+            mimeType,
+            publicUrl
+          });
+
+          responseData = {
+            success: true,
+            url: publicUrl,
+            fileName,
+            fileSize: binaryData.length,
+            mimeType,
+            bucket: bucketName
+          };
+        } catch (uploadError) {
+          console.error('Upload processing error:', uploadError);
+          throw new Error(`Upload processing failed: ${uploadError.message}`);
+        }
+        break;
+      }
+
+      default:
+        throw new Error('Invalid action');
+    }
+
+    return new Response(JSON.stringify({ data: responseData }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    console.error('Wallpaper management error:', error);
+
+    const errorResponse = {
+      error: {
+        code: 'WALLPAPER_MANAGEMENT_ERROR',
+        message: error.message || 'Failed to manage wallpaper'
+      }
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Helper function to get category paths for cache invalidation
+async function getCategoryPaths(supabaseUrl: string, headers: any, categoryId: number): Promise<string[]> {
+  try {
+    const response = await fetch(`${supabaseUrl}/rest/v1/categories?id=eq.${categoryId}&select=slug`, {
+      headers
+    });
+    
+    if (response.ok) {
+      const categories = await response.json();
+      if (categories.length > 0) {
+        return [`/category/${categories[0].slug}`];
+      }
+    }
+  } catch (error) {
+    console.error('Error getting category paths:', error);
+  }
+  return [];
+}
+
+// Helper function to trigger cache invalidation
+async function invalidateCache(supabaseUrl: string, headers: any, { paths, type }: { paths: string[], type: string }) {
+  try {
+    // Remove duplicates and empty paths
+    const uniquePaths = [...new Set(paths.filter(path => path && path.trim()))];
+    
+    if (uniquePaths.length === 0) return;
+
+    // Log cache invalidation requests
+    const invalidationRequests = uniquePaths.map(path => ({
+      path,
+      invalidation_type: type,
+      processed: false
+    }));
+
+    await fetch(`${supabaseUrl}/rest/v1/cache_invalidations`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(invalidationRequests)
+    });
+
+    console.log(`Cache invalidation logged for ${uniquePaths.length} paths:`, uniquePaths);
+    
+    // Immediately trigger cache processing
+    try {
+      await fetch(`${supabaseUrl}/functions/v1/cache-invalidation-processor`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action: 'PROCESS_PENDING' })
+      });
+    } catch (processingError) {
+      console.error('Error processing cache invalidation:', processingError);
+      // Don't fail the main operation if cache processing fails
+    }
+  } catch (error) {
+    console.error('Error invalidating cache:', error);
+    // Don't fail the main operation if cache invalidation fails
+  }
+}

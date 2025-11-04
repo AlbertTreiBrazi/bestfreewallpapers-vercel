@@ -1,0 +1,303 @@
+/**
+ * Create Secure Storage Buckets for File Upload Security
+ * This edge function sets up the secure storage infrastructure
+ */
+
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+        if (!serviceRoleKey || !supabaseUrl) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        const requestData = await req.json();
+        const { action } = requestData;
+
+        if (action === 'create_secure_buckets') {
+            const results = await createSecureBuckets(supabaseUrl, serviceRoleKey);
+            
+            return new Response(JSON.stringify({
+                success: true,
+                message: 'Secure storage buckets created successfully',
+                results
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (action === 'check_bucket_status') {
+            const status = await checkBucketStatus(supabaseUrl, serviceRoleKey);
+            
+            return new Response(JSON.stringify({
+                success: true,
+                buckets: status
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (action === 'setup_bucket_policies') {
+            const policies = await setupBucketPolicies(supabaseUrl, serviceRoleKey);
+            
+            return new Response(JSON.stringify({
+                success: true,
+                message: 'Bucket policies configured successfully',
+                policies
+            }), {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+        }
+
+        return new Response(JSON.stringify({
+            success: false,
+            error: 'Invalid action'
+        }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+
+    } catch (error: any) {
+        console.error('Secure buckets setup error:', error);
+        return new Response(JSON.stringify({
+            success: false,
+            error: 'Failed to setup secure buckets',
+            details: error.message
+        }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});
+
+async function createSecureBuckets(supabaseUrl: string, serviceRoleKey: string) {
+    const bucketsToCreate = [
+        {
+            id: 'wallpapers-secure',
+            name: 'Wallpapers Secure',
+            public: false,
+            allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+            fileSizeLimit: 10485760, // 10MB
+            description: 'Secure storage for wallpaper uploads with validation'
+        },
+        {
+            id: 'profiles-secure',
+            name: 'Profile Pictures Secure',
+            public: false,
+            allowedMimeTypes: ['image/jpeg', 'image/png'],
+            fileSizeLimit: 2097152, // 2MB
+            description: 'Secure storage for user profile pictures'
+        },
+        {
+            id: 'categories-secure',
+            name: 'Category Images Secure',
+            public: false,
+            allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'],
+            fileSizeLimit: 5242880, // 5MB
+            description: 'Secure storage for category preview images'
+        },
+        {
+            id: 'uploads-secure',
+            name: 'General Secure Uploads',
+            public: false,
+            allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+            fileSizeLimit: 10485760, // 10MB
+            description: 'Secure storage for general file uploads'
+        }
+    ];
+
+    const results = [];
+
+    for (const bucket of bucketsToCreate) {
+        try {
+            // Create bucket
+            const createResponse = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    id: bucket.id,
+                    name: bucket.name,
+                    public: bucket.public,
+                    allowed_mime_types: bucket.allowedMimeTypes,
+                    file_size_limit: bucket.fileSizeLimit
+                })
+            });
+
+            if (createResponse.ok) {
+                results.push({
+                    bucket: bucket.id,
+                    status: 'created',
+                    description: bucket.description
+                });
+            } else if (createResponse.status === 409) {
+                // Bucket already exists
+                results.push({
+                    bucket: bucket.id,
+                    status: 'already_exists',
+                    description: bucket.description
+                });
+            } else {
+                const errorText = await createResponse.text();
+                results.push({
+                    bucket: bucket.id,
+                    status: 'error',
+                    error: errorText
+                });
+            }
+        } catch (error: any) {
+            results.push({
+                bucket: bucket.id,
+                status: 'error',
+                error: error.message
+            });
+        }
+    }
+
+    return results;
+}
+
+async function checkBucketStatus(supabaseUrl: string, serviceRoleKey: string) {
+    try {
+        const response = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch buckets');
+        }
+
+        const buckets = await response.json();
+        const securityBuckets = ['wallpapers-secure', 'profiles-secure', 'categories-secure', 'uploads-secure'];
+        
+        return buckets
+            .filter((bucket: any) => securityBuckets.includes(bucket.id))
+            .map((bucket: any) => ({
+                id: bucket.id,
+                name: bucket.name,
+                public: bucket.public,
+                created_at: bucket.created_at,
+                updated_at: bucket.updated_at
+            }));
+
+    } catch (error: any) {
+        throw new Error(`Failed to check bucket status: ${error.message}`);
+    }
+}
+
+async function setupBucketPolicies(supabaseUrl: string, serviceRoleKey: string) {
+    const policies = [
+        {
+            bucket_id: 'wallpapers-secure',
+            policy_name: 'authenticated_upload_wallpapers',
+            definition: {
+                role: 'authenticated',
+                operation: 'INSERT',
+                definition: 'true'
+            }
+        },
+        {
+            bucket_id: 'wallpapers-secure',
+            policy_name: 'owner_select_wallpapers',
+            definition: {
+                role: 'authenticated',
+                operation: 'SELECT',
+                definition: 'auth.uid()::text = (storage.foldername(name))[1]'
+            }
+        },
+        {
+            bucket_id: 'profiles-secure',
+            policy_name: 'authenticated_upload_profiles',
+            definition: {
+                role: 'authenticated',
+                operation: 'INSERT',
+                definition: 'true'
+            }
+        },
+        {
+            bucket_id: 'profiles-secure',
+            policy_name: 'owner_select_profiles',
+            definition: {
+                role: 'authenticated',
+                operation: 'SELECT',
+                definition: 'auth.uid()::text = (storage.foldername(name))[1]'
+            }
+        },
+        {
+            bucket_id: 'categories-secure',
+            policy_name: 'admin_only_categories',
+            definition: {
+                role: 'authenticated',
+                operation: 'ALL',
+                definition: `
+                    EXISTS (
+                        SELECT 1 FROM profiles 
+                        WHERE profiles.user_id = auth.uid() 
+                        AND profiles.is_admin = true
+                    )
+                `
+            }
+        }
+    ];
+
+    const results = [];
+
+    for (const policy of policies) {
+        try {
+            const response = await fetch(`${supabaseUrl}/storage/v1/bucket/${policy.bucket_id}/policy`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: policy.policy_name,
+                    definition: policy.definition
+                })
+            });
+
+            if (response.ok) {
+                results.push({
+                    bucket: policy.bucket_id,
+                    policy: policy.policy_name,
+                    status: 'created'
+                });
+            } else {
+                const errorText = await response.text();
+                results.push({
+                    bucket: policy.bucket_id,
+                    policy: policy.policy_name,
+                    status: 'error',
+                    error: errorText
+                });
+            }
+        } catch (error: any) {
+            results.push({
+                bucket: policy.bucket_id,
+                policy: policy.policy_name,
+                status: 'error',
+                error: error.message
+            });
+        }
+    }
+
+    return results;
+}

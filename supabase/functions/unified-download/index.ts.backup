@@ -1,0 +1,233 @@
+Deno.serve(async (req) => {
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        'Access-Control-Allow-Credentials': 'false'
+    };
+
+    if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 200, headers: corsHeaders });
+    }
+
+    try {
+        const url = new URL(req.url);
+        const wallpaperId = url.searchParams.get('id');
+        const resolution = url.searchParams.get('resolution') || '1080p';
+        const authToken = req.headers.get('authorization')?.replace('Bearer ', '');
+
+        if (!wallpaperId || !authToken) {
+            throw new Error('Missing required parameters');
+        }
+
+        const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+
+        if (!serviceRoleKey || !supabaseUrl || !supabaseAnonKey) {
+            throw new Error('Supabase configuration missing');
+        }
+
+        // Verify auth token and get user
+        const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'apikey': supabaseAnonKey
+            }
+        });
+
+        if (!userResponse.ok) {
+            throw new Error('Invalid authentication token');
+        }
+
+        const userData = await userResponse.json();
+        const userId = userData.id;
+
+        // Get user profile for premium check and rate limiting
+        const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?user_id=eq.${userId}&select=plan_type,premium_expires_at`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!profileResponse.ok) {
+            throw new Error('Failed to fetch user profile');
+        }
+
+        const profiles = await profileResponse.json();
+        const profile = profiles[0];
+        
+        const isPremiumUser = profile?.plan_type === 'premium' && 
+                             (!profile?.premium_expires_at || new Date(profile.premium_expires_at) > new Date());
+
+        // Get wallpaper data with category info
+        const wallpaperResponse = await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}&select=id,title,is_premium,download_count,categories(slug)`, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!wallpaperResponse.ok) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpapers = await wallpaperResponse.json();
+        
+        if (!wallpapers || wallpapers.length === 0) {
+            throw new Error('Wallpaper not found');
+        }
+
+        const wallpaper = wallpapers[0];
+
+        // Check premium access
+        if (wallpaper.is_premium && !isPremiumUser) {
+            throw new Error('Premium subscription required for this wallpaper');
+        }
+
+        // Check rate limiting for free users
+        if (!isPremiumUser) {
+            const now = new Date();
+            const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+            const downloadsResponse = await fetch(`${supabaseUrl}/rest/v1/downloads?user_id=eq.${userId}&created_at=gte.${oneHourAgo.toISOString()}&select=id`, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Accept': 'application/json'
+                }
+            });
+
+            if (downloadsResponse.ok) {
+                const recentDownloads = await downloadsResponse.json();
+                if (recentDownloads.length >= 10) {
+                    throw new Error('Download limit reached. Free users can download 10 wallpapers per hour.');
+                }
+            }
+        }
+
+        // Determine file path in optimized storage structure
+        const categorySlug = wallpaper.categories?.slug || 'uncategorized';
+        const fileExtension = resolution === '1080p' ? 'jpg' : 'jpg'; // All originals are jpg
+        const filePath = `original/${categorySlug}/${wallpaperId}.${fileExtension}`;
+
+        // Create signed URL using Supabase Storage native method
+        const signedUrlResponse = await fetch(`${supabaseUrl}/storage/v1/object/sign/wallpapers-original/${filePath}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                expiresIn: 3600 // 1 hour
+            })
+        });
+
+        if (!signedUrlResponse.ok) {
+            // Fallback: try to find the file in legacy locations
+            const legacyPaths = [
+                `${wallpaperId}.${fileExtension}`,
+                `wallpapers/${wallpaperId}.${fileExtension}`,
+                `original/${wallpaperId}.${fileExtension}`
+            ];
+            
+            let signedUrlData = null;
+            for (const legacyPath of legacyPaths) {
+                const legacyResponse = await fetch(`${supabaseUrl}/storage/v1/object/sign/wallpapers-original/${legacyPath}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        expiresIn: 3600
+                    })
+                });
+                
+                if (legacyResponse.ok) {
+                    signedUrlData = await legacyResponse.json();
+                    break;
+                }
+            }
+            
+            if (!signedUrlData) {
+                throw new Error('File not found in storage');
+            }
+        } else {
+            const signedUrlData = await signedUrlResponse.json();
+        }
+
+        const signedUrlData = signedUrlResponse.ok ? await signedUrlResponse.json() : null;
+        if (!signedUrlData) {
+            throw new Error('Failed to generate download URL');
+        }
+
+        // Log the download
+        const logResponse = await fetch(`${supabaseUrl}/rest/v1/downloads`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                user_id: userId,
+                wallpaper_id: parseInt(wallpaperId),
+                resolution: resolution,
+                download_type: 'direct'
+            })
+        });
+
+        // Update download count (optional - don't fail if this fails)
+        if (logResponse.ok) {
+            await fetch(`${supabaseUrl}/rest/v1/wallpapers?id=eq.${wallpaperId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    download_count: wallpaper.download_count + 1
+                })
+            });
+        }
+
+        // Return the signed URL with CDN-friendly headers
+        return new Response(JSON.stringify({
+            data: {
+                downloadUrl: `${supabaseUrl}${signedUrlData.signedURL}`,
+                filename: `${wallpaper.title.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_')}-${resolution}.jpg`,
+                expiresAt: new Date(Date.now() + 3600 * 1000).toISOString()
+            }
+        }), {
+            headers: {
+                ...corsHeaders,
+                'Content-Type': 'application/json',
+                'Cache-Control': 'public, max-age=300', // Cache for 5 minutes
+                'CDN-Cache-Tag': `wallpaper-${wallpaperId}`
+            }
+        });
+
+    } catch (error) {
+        console.error('Download error:', error);
+
+        const errorResponse = {
+            error: {
+                code: 'DOWNLOAD_FAILED',
+                message: error.message
+            }
+        };
+
+        return new Response(JSON.stringify(errorResponse), {
+            status: error.message.includes('Premium subscription required') ? 403 :
+                   error.message.includes('Download limit reached') ? 429 :
+                   error.message.includes('not found') ? 404 : 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+    }
+});

@@ -1,0 +1,147 @@
+// Guest Ad Image Upload Edge Function
+// Handles secure image uploads for guest ad configuration
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Max-Age': '86400',
+}
+
+serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders })
+  }
+
+  try {
+    // Only allow POST requests
+    if (req.method !== 'POST') {
+      throw new Error('Method not allowed')
+    }
+
+    // Parse the authorization header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader) {
+      throw new Error('Authorization header required')
+    }
+
+    // Create Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    
+    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2')
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+    // Get user from JWT token
+    const token = authHeader.replace('Bearer ', '')
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+    
+    if (authError || !user) {
+      throw new Error('Invalid authentication token')
+    }
+
+    // Check if user is admin
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('is_admin')
+      .eq('user_id', user.id)
+      .single()
+
+    if (profileError || !profile?.is_admin) {
+      throw new Error('Admin access required')
+    }
+
+    // Parse form data
+    const formData = await req.formData()
+    const file = formData.get('file') as File
+    
+    if (!file) {
+      throw new Error('No file provided')
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+    if (!allowedTypes.includes(file.type)) {
+      throw new Error('Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed.')
+    }
+
+    // Validate file size (5MB limit)
+    const maxSize = 5 * 1024 * 1024 // 5MB
+    if (file.size > maxSize) {
+      throw new Error('File size too large. Maximum size is 5MB.')
+    }
+
+    // Generate unique filename
+    const timestamp = Date.now()
+    const extension = file.name.split('.').pop() || 'jpg'
+    const filename = `guest-ad-${timestamp}.${extension}`
+    const filePath = `guest-ads/${filename}`
+
+    // Upload file to Supabase Storage
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('wallpapers') // Use existing wallpapers bucket
+      .upload(filePath, file, {
+        cacheControl: '3600',
+        upsert: false
+      })
+
+    if (uploadError) {
+      console.error('Upload error:', uploadError)
+      throw new Error(`Upload failed: ${uploadError.message}`)
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('wallpapers')
+      .getPublicUrl(filePath)
+
+    if (!urlData?.publicUrl) {
+      throw new Error('Failed to generate public URL')
+    }
+
+    // Log successful upload
+    console.log(`Guest ad image uploaded successfully: ${filePath}`)
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          filename: filename,
+          filePath: filePath,
+          publicUrl: urlData.publicUrl,
+          size: file.size,
+          type: file.type
+        }
+      }),
+      {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        }
+      }
+    )
+
+  } catch (error: any) {
+    console.error('Guest ad image upload error:', error)
+    
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: {
+          code: 'UPLOAD_ERROR',
+          message: error.message || 'Upload failed'
+        }
+      }),
+      {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json'
+        }
+      }
+    )
+  }
+})

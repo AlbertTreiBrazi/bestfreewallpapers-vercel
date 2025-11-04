@@ -1,0 +1,289 @@
+// Cache Invalidation Processor - Production-ready CDN cache purging
+// This function processes cache invalidation requests and purges Cloudflare cache
+
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    // Get Cloudflare credentials from environment
+    const cloudflareToken = Deno.env.get('CLOUDFLARE_API_TOKEN');
+    const cloudflareZoneId = Deno.env.get('CLOUDFLARE_ZONE_ID');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+    if (!cloudflareToken || !cloudflareZoneId || !supabaseServiceKey || !supabaseUrl) {
+      return new Response(JSON.stringify({ 
+        error: {
+          code: 'MISSING_CREDENTIALS',
+          message: 'Required environment variables not set'
+        }
+      }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const requestData = await req.json();
+    const { action = 'PROCESS_PENDING', batchSize = 30, paths = [], forceProcess = false } = requestData;
+
+    // Initialize Supabase client
+    const supabaseHeaders = {
+      'Authorization': `Bearer ${supabaseServiceKey}`,
+      'apikey': supabaseServiceKey,
+      'Content-Type': 'application/json'
+    };
+
+    switch (action) {
+      case 'PROCESS_PENDING': {
+        // Fetch pending cache invalidations
+        const fetchResponse = await fetch(`${supabaseUrl}/rest/v1/cache_invalidations?status=eq.pending&order=created_at.asc&limit=${batchSize}`, {
+          headers: supabaseHeaders
+        });
+
+        if (!fetchResponse.ok) {
+          throw new Error(`Failed to fetch pending invalidations: ${fetchResponse.statusText}`);
+        }
+
+        const pendingInvalidations = await fetchResponse.json();
+        
+        if (pendingInvalidations.length === 0) {
+          return new Response(JSON.stringify({ 
+            data: { 
+              processed: 0, 
+              message: 'No pending invalidations found' 
+            }
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        const result = await processInvalidationBatch(pendingInvalidations, cloudflareToken, cloudflareZoneId, supabaseUrl, supabaseHeaders);
+        
+        return new Response(JSON.stringify({ data: result }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      case 'INVALIDATE_PATHS': {
+        if (!paths || paths.length === 0) {
+          throw new Error('Paths array is required for manual invalidation');
+        }
+
+        const result = await purgeCloudflareCache(paths, cloudflareToken, cloudflareZoneId);
+        
+        return new Response(JSON.stringify({ 
+          data: {
+            success: result.success,
+            paths_purged: paths.length,
+            cloudflare_result: result
+          }
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      case 'CLEAR_ALL_CACHE': {
+        // Emergency cache clear - purge everything
+        const purgeAllResult = await fetch(`https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/purge_cache`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${cloudflareToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            purge_everything: true
+          })
+        });
+
+        const result = await purgeAllResult.json();
+        
+        // Log the manual clear action
+        await fetch(`${supabaseUrl}/rest/v1/cache_invalidations`, {
+          method: 'POST',
+          headers: supabaseHeaders,
+          body: JSON.stringify({
+            path: '/*',
+            invalidation_type: 'manual_clear_all',
+            status: result.success ? 'processed' : 'error',
+            processed_at: new Date().toISOString(),
+            metadata: { cloudflare_result: result }
+          })
+        });
+
+        return new Response(JSON.stringify({ 
+          data: {
+            success: result.success,
+            message: result.success ? 'All cache cleared successfully' : 'Failed to clear cache',
+            cloudflare_result: result
+          }
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      case 'GET_CACHE_STATUS': {
+        // Get cache invalidation statistics
+        const statsResponse = await fetch(`${supabaseUrl}/rest/v1/cache_invalidations?select=*&order=created_at.desc&limit=100`, {
+          headers: supabaseHeaders
+        });
+
+        if (!statsResponse.ok) {
+          throw new Error('Failed to fetch cache stats');
+        }
+
+        const stats = await statsResponse.json();
+        const pending = stats.filter(s => s.status === 'pending').length;
+        const processed = stats.filter(s => s.status === 'processed').length;
+        const errors = stats.filter(s => s.status === 'error').length;
+        const recent = stats.slice(0, 10);
+
+        return new Response(JSON.stringify({ 
+          data: {
+            pending,
+            processed,
+            errors,
+            total: stats.length,
+            recent,
+            success_rate: processed / (processed + errors) * 100 || 0
+          }
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      default:
+        throw new Error(`Unknown action: ${action}`);
+    }
+
+  } catch (error) {
+    console.error('Cache invalidation processor error:', error);
+    
+    return new Response(JSON.stringify({
+      error: {
+        code: 'PROCESSING_ERROR',
+        message: error.message,
+        timestamp: new Date().toISOString()
+      }
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Process a batch of cache invalidations
+async function processInvalidationBatch(invalidations: any[], cloudflareToken: string, cloudflareZoneId: string, supabaseUrl: string, supabaseHeaders: any) {
+  // Group paths by domain for efficient purging
+  const pathsByDomain = {};
+  const invalidationIds = [];
+  const baseUrl = 'https://ol1hsddl3tgy.space.minimax.io'; // Current deployment URL
+  
+  for (const invalidation of invalidations) {
+    invalidationIds.push(invalidation.id);
+    
+    if (!pathsByDomain[baseUrl]) {
+      pathsByDomain[baseUrl] = [];
+    }
+    
+    // Add full URLs for purging
+    pathsByDomain[baseUrl].push(`${baseUrl}${invalidation.path}`);
+  }
+
+  const results = [];
+  let totalProcessed = 0;
+  let totalErrors = 0;
+
+  // Process each domain's cache invalidations
+  for (const [domain, urls] of Object.entries(pathsByDomain)) {
+    const purgeResult = await purgeCloudflareCache(urls, cloudflareToken, cloudflareZoneId);
+    
+    if (purgeResult.success) {
+      results.push({
+        domain,
+        status: 'success',
+        urls_purged: urls.length,
+        cloudflare_id: purgeResult.result?.id || null
+      });
+      totalProcessed += urls.length;
+    } else {
+      results.push({
+        domain,
+        status: 'error',
+        error: purgeResult.errors?.[0]?.message || 'Unknown Cloudflare error',
+        urls_attempted: urls.length
+      });
+      totalErrors += urls.length;
+    }
+  }
+
+  // Update database records
+  const updatePromises = invalidationIds.map(id => {
+    const wasSuccessful = results.some(r => r.status === 'success');
+    const status = wasSuccessful ? 'processed' : 'error';
+    const metadata = {
+      processed_at: new Date().toISOString(),
+      cloudflare_results: results,
+      batch_id: `batch_${Date.now()}`
+    };
+
+    return fetch(`${supabaseUrl}/rest/v1/cache_invalidations?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: supabaseHeaders,
+      body: JSON.stringify({
+        status,
+        metadata,
+        processed_at: new Date().toISOString()
+      })
+    });
+  });
+
+  await Promise.all(updatePromises);
+
+  return {
+    total_processed: totalProcessed,
+    total_errors: totalErrors,
+    results,
+    batch_summary: {
+      domains: Object.keys(pathsByDomain).length,
+      total_paths: invalidations.length,
+      success_rate: totalProcessed / (totalProcessed + totalErrors) * 100 || 0
+    }
+  };
+}
+
+// Purge specific URLs from Cloudflare cache
+async function purgeCloudflareCache(urls: string[], cloudflareToken: string, cloudflareZoneId: string) {
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/purge_cache`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${cloudflareToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        files: urls
+      })
+    });
+
+    const result = await response.json();
+    console.log(`Cloudflare cache purge result:`, result);
+    
+    return result;
+  } catch (error) {
+    console.error('Cloudflare purge error:', error);
+    return {
+      success: false,
+      errors: [{ message: error.message }]
+    };
+  }
+}

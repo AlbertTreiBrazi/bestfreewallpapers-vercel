@@ -1,0 +1,321 @@
+// Load timer settings for validation
+async function loadTimerSettings(supabaseHeaders: any, supabaseUrl: string) {
+  const defaultSettings = {
+    guest_timer_duration: 15,
+    logged_in_timer_duration: 6
+  };
+
+  try {
+    const [guestResponse, loggedInResponse] = await Promise.all([
+      fetch(`${supabaseUrl}/rest/v1/guest_ad_settings?select=guest_timer_duration&order=created_at.desc&limit=1`, 
+            { headers: supabaseHeaders }),
+      fetch(`${supabaseUrl}/rest/v1/logged_in_ad_settings?select=logged_in_timer_duration&order=created_at.desc&limit=1`, 
+            { headers: supabaseHeaders })
+    ]);
+
+    if (guestResponse.ok && loggedInResponse.ok) {
+      const guestData = await guestResponse.json();
+      const loggedInData = await loggedInResponse.json();
+      
+      if (guestData.length > 0 && loggedInData.length > 0) {
+        return {
+          guest_timer_duration: guestData[0].guest_timer_duration,
+          logged_in_timer_duration: loggedInData[0].logged_in_timer_duration
+        };
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load timer settings, using defaults:', error);
+  }
+
+  return defaultSettings;
+}
+
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': 'https://jfsmnwjifcq3.space.minimax.io',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const url = new URL(req.url);
+    const token = url.searchParams.get('token');
+
+    if (!token) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Download token is required'
+        }
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+
+    if (!serviceRoleKey || !supabaseUrl) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const supabaseHeaders = {
+      'Authorization': `Bearer ${serviceRoleKey}`,
+      'apikey': serviceRoleKey,
+      'Content-Type': 'application/json'
+    };
+
+    // Verify download session
+    const sessionResponse = await fetch(
+      `${supabaseUrl}/rest/v1/download_sessions?token=eq.${token}&select=*`,
+      { headers: supabaseHeaders }
+    );
+
+    if (!sessionResponse.ok) {
+      throw new Error('Failed to verify download session');
+    }
+
+    const sessions = await sessionResponse.json();
+    if (sessions.length === 0) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'INVALID_TOKEN',
+          message: 'Invalid or expired download token'
+        }
+      }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const session = sessions[0];
+
+    // Check if session has expired
+    const now = new Date();
+    const expiresAt = new Date(session.expires_at);
+    if (now > expiresAt) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'TOKEN_EXPIRED',
+          message: 'Download token has expired'
+        }
+      }), {
+        status: 410,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    // CRITICAL FIX: Timer validation for non-premium users
+    if (!session.is_premium_user) {
+      const timerSettings = await loadTimerSettings(supabaseHeaders, supabaseUrl);
+      const requiredWaitTime = session.user_id ? 
+        timerSettings.logged_in_timer_duration : 
+        timerSettings.guest_timer_duration;
+      
+      const sessionCreated = new Date(session.created_at);
+      const elapsedSeconds = (now.getTime() - sessionCreated.getTime()) / 1000;
+      
+      // FIXED: Proper timer enforcement - no lenient tolerance that allows bypass
+      if (elapsedSeconds < requiredWaitTime) {
+        const remainingTime = Math.ceil(requiredWaitTime - elapsedSeconds);
+        
+        return new Response(JSON.stringify({
+          error: {
+            code: 'TIMER_NOT_COMPLETED',
+            message: `Please wait ${remainingTime} more seconds before downloading`,
+            remaining_time: remainingTime,
+            required_time: requiredWaitTime,
+            elapsed_time: Math.floor(elapsedSeconds)
+          }
+        }), {
+          status: 429,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+      
+      console.log('Timer validation passed:', {
+        required: requiredWaitTime,
+        elapsed: elapsedSeconds,
+        user_type: session.user_id ? 'logged_in' : 'guest'
+      });
+    }
+
+    // Get wallpaper information
+    const wallpaperResponse = await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?id=eq.${session.wallpaper_id}&select=id,title,download_count,categories(slug)`,
+      { headers: supabaseHeaders }
+    );
+
+    if (!wallpaperResponse.ok) {
+      throw new Error('Wallpaper not found');
+    }
+
+    const wallpapers = await wallpaperResponse.json();
+    if (wallpapers.length === 0) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'WALLPAPER_NOT_FOUND',
+          message: 'Wallpaper not found'
+        }
+      }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const wallpaper = wallpapers[0];
+
+    // Get wallpaper premium status for quota tracking
+    const wallpaperDetailResponse = await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?id=eq.${session.wallpaper_id}&select=is_premium`,
+      { headers: supabaseHeaders }
+    );
+    
+    const wallpaperDetail = wallpaperDetailResponse.ok ? (await wallpaperDetailResponse.json())[0] : null;
+    const isPremiumWallpaper = wallpaperDetail?.is_premium || false;
+    
+    // Log the download
+    const downloadLog = {
+      user_id: session.user_id,
+      wallpaper_id: session.wallpaper_id,
+      resolution: session.resolution,
+      download_type: session.is_premium_user ? 'premium' : (session.user_id ? 'free' : 'guest'),
+      user_type: session.is_premium_user ? 'premium' : (session.user_id ? 'free' : 'guest'),
+      ip_address: session.ip_address,
+      user_agent: session.user_agent,
+      download_token: token,
+      created_at: new Date().toISOString()
+    };
+
+    await fetch(
+      `${supabaseUrl}/rest/v1/downloads`,
+      {
+        method: 'POST',
+        headers: supabaseHeaders,
+        body: JSON.stringify(downloadLog)
+      }
+    );
+    
+    // Track daily quota for free users downloading premium wallpapers
+    if (session.user_id && !session.is_premium_user && isPremiumWallpaper) {
+      const quotaEntry = {
+        user_id: session.user_id,
+        wallpaper_id: session.wallpaper_id,
+        download_date: new Date().toISOString().split('T')[0],
+        user_type: 'free',
+        created_at: new Date().toISOString()
+      };
+      
+      await fetch(
+        `${supabaseUrl}/rest/v1/daily_quotas`,
+        {
+          method: 'POST',
+          headers: supabaseHeaders,
+          body: JSON.stringify(quotaEntry)
+        }
+      );
+    }
+
+    // Update wallpaper download count
+    await fetch(
+      `${supabaseUrl}/rest/v1/wallpapers?id=eq.${session.wallpaper_id}`,
+      {
+        method: 'PATCH',
+        headers: supabaseHeaders,
+        body: JSON.stringify({
+          download_count: wallpaper.download_count + 1
+        })
+      }
+    );
+
+    // Delete the used session token
+    await fetch(
+      `${supabaseUrl}/rest/v1/download_sessions?token=eq.${token}`,
+      {
+        method: 'DELETE',
+        headers: supabaseHeaders
+      }
+    );
+
+    // Create signed URL for the actual file
+    let signedUrl = null;
+    
+    if (session.download_url.includes('supabase.co/storage')) {
+      // For Supabase storage files, create signed URL
+      try {
+        const categorySlug = wallpaper.categories?.slug || 'uncategorized';
+        const filePaths = [
+          `original/${categorySlug}/${session.wallpaper_id}.jpg`,
+          `${session.wallpaper_id}.jpg`,
+          `wallpapers/${session.wallpaper_id}.jpg`,
+          `original/${session.wallpaper_id}.jpg`
+        ];
+
+        for (const filePath of filePaths) {
+          const signedUrlResponse = await fetch(
+            `${supabaseUrl}/storage/v1/object/sign/wallpapers-original/${filePath}`,
+            {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                expiresIn: 300 // 5 minutes
+              })
+            }
+          );
+
+          if (signedUrlResponse.ok) {
+            const signedUrlData = await signedUrlResponse.json();
+            signedUrl = `${supabaseUrl}${signedUrlData.signedURL}`;
+            break;
+          }
+        }
+      } catch (error) {
+        console.log('Failed to create signed URL, using direct URL:', error.message);
+      }
+    }
+
+    // Use signed URL if available, otherwise use the original URL
+    const finalDownloadUrl = signedUrl || session.download_url;
+
+    // Generate filename
+    const filename = `${wallpaper.title.replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_')}-${session.resolution}.jpg`;
+
+    return new Response(JSON.stringify({
+      data: {
+        download_url: finalDownloadUrl,
+        filename: filename,
+        wallpaper_title: wallpaper.title,
+        resolution: session.resolution,
+        expires_in: 300 // 5 minutes
+      }
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+
+  } catch (error: any) {
+    console.error('Download file error:', error);
+
+    const errorResponse = {
+      error: {
+        code: 'DOWNLOAD_FILE_ERROR',
+        message: error.message || 'Internal server error'
+      }
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});

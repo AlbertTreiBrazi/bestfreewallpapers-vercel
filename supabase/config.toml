@@ -1,0 +1,12 @@
+project_id = "eocgtrggcalfptqhgxer"
+
+[api]
+enabled = true
+port = 54321
+max_rows = 1000
+
+[functions]
+enabled = true
+
+[functions.wallpapers-api]
+verify_jwt = false

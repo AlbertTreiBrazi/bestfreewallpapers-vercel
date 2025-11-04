@@ -1,0 +1,157 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
+Deno.serve(async (req) => {
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT, DELETE, PATCH',
+    'Access-Control-Max-Age': '86400',
+    'Access-Control-Allow-Credentials': 'false'
+  };
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    // Create a Supabase client with the service role key for admin operations
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    if (req.method === 'POST') {
+      const requestData = await req.json();
+      const { action } = requestData;
+
+      if (action === 'process_pending') {
+        // Process all pending cache invalidations
+        const { data: pendingInvalidations, error: fetchError } = await supabaseAdmin
+          .from('cache_invalidations')
+          .select('*')
+          .eq('processed', false);
+
+        if (fetchError) {
+          throw new Error(`Failed to fetch pending invalidations: ${fetchError.message}`);
+        }
+
+        let processedCount = 0;
+        
+        // Process each pending invalidation
+        for (const invalidation of pendingInvalidations || []) {
+          // Update processed to true
+          const { error: updateError } = await supabaseAdmin
+            .from('cache_invalidations')
+            .update({ 
+              processed: true,
+              processed_at: new Date().toISOString()
+            })
+            .eq('id', invalidation.id);
+
+          if (!updateError) {
+            processedCount++;
+          }
+        }
+
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            processed: processedCount,
+            message: `Successfully processed ${processedCount} pending invalidations`
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      } 
+      else if (action === 'clear_all') {
+        // Clear all cache invalidations (delete processed ones, reset pending ones)
+        
+        // First, delete all processed invalidations
+        const { error: deleteError } = await supabaseAdmin
+          .from('cache_invalidations')
+          .delete()
+          .eq('processed', true);
+
+        if (deleteError) {
+          throw new Error(`Failed to clear processed invalidations: ${deleteError.message}`);
+        }
+
+        // Count how many pending ones we're going to clear
+        const { data: pendingCount, error: countError } = await supabaseAdmin
+          .from('cache_invalidations')
+          .select('id')
+          .eq('processed', false);
+
+        if (countError) {
+          throw new Error(`Failed to count pending invalidations: ${countError.message}`);
+        }
+
+        // Delete pending invalidations as well
+        const { error: deletePendingError } = await supabaseAdmin
+          .from('cache_invalidations')
+          .delete()
+          .eq('processed', false);
+
+        if (deletePendingError) {
+          throw new Error(`Failed to clear pending invalidations: ${deletePendingError.message}`);
+        }
+
+        const totalCleared = (pendingCount || []).length;
+
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            cleared: totalCleared,
+            message: `Successfully cleared ${totalCleared} cache entries`
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
+      else {
+        return new Response(
+          JSON.stringify({ 
+            error: {
+              code: 'INVALID_ACTION',
+              message: 'Invalid action. Supported actions: process_pending, clear_all'
+            }
+          }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
+    }
+    else {
+      return new Response(
+        JSON.stringify({ 
+          error: {
+            code: 'METHOD_NOT_ALLOWED',
+            message: 'Only POST method is supported'
+          }
+        }),
+        {
+          status: 405,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      );
+    }
+  } catch (error) {
+    console.error('Cache invalidator error:', error);
+    
+    const errorResponse = {
+      error: {
+        code: 'CACHE_INVALIDATOR_ERROR',
+        message: error.message || 'An unexpected error occurred'
+      }
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+});
